@@ -812,13 +812,16 @@ async def register_player(interaction: discord.Interaction, player: discord.Memb
 @app_commands.choices(position=[app_commands.Choice(name=p, value=p) for p in POSITIONS])
 @app_commands.checks.has_permissions(manage_guild=True)
 async def register_all(interaction: discord.Interaction, role: discord.Role, position: str):
-    await interaction.response.defer()
+    # Respond immediately so Discord doesnt time out
+    await interaction.response.send_message(
+        embed=base_embed("⏳ Registering...", f"Processing {role.mention} members, please wait..."),
+        ephemeral=False
+    )
     db = await get_db()
     members = [m for m in role.members if not m.bot]
     if not members:
-        return await interaction.followup.send(embed=error_embed("No Members", f"{role.mention} has no members."))
+        return await interaction.edit_original_response(embed=error_embed("No Members", f"{role.mention} has no members."))
 
-    # Fetch all existing player IDs in one query
     cur = await db.execute("SELECT discord_id FROM players")
     existing = set(row[0] for row in await cur.fetchall())
 
@@ -845,7 +848,7 @@ async def register_all(interaction: discord.Interaction, role: discord.Role, pos
     e.add_field(name="Registered (" + str(len(added)) + ")", value=("\n".join(added) if added else "_None_"), inline=False)
     if skipped:
         e.add_field(name="Already Registered (" + str(len(skipped)) + ")", value="\n".join(skipped), inline=False)
-    await interaction.followup.send(embed=e)
+    await interaction.edit_original_response(embed=e)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
