@@ -18,6 +18,24 @@ async def get_db() -> aiosqlite.Connection:
         await _db.execute("PRAGMA journal_mode=WAL")
     return _db
 
+# ── Pre-configured teams and roles ───────────────────────────────
+GUILD_ID      = 1464096719867347096
+FA_ROLE_ID    = 1464129524210995325
+
+TEAM_DATA = [
+    ("Iowa Dream",           "IOWA", 1478105341899051028),
+    ("St Louis Archers",     "STL",  1478111948313989160),
+    ("Philadelphia Surge",   "PHI",  1483156350258254084),
+    ("Seattle Sonics",       "SEA",  1481717125877071992),
+    ("Baltimore Ospreys",    "BAL",  1481718253536546888),
+    ("Los Angeles Reapers",  "LAR",  1482413661824745602),
+    ("Chicago Ravens",       "CHI",  1483336220544077924),
+    ("Arizona Firebirds",    "ARI",  1482435095938732042),
+    ("Houston Bulls",        "HOU",  1482465219103166484),
+    ("San Diego Tropics",    "SDT",  1483156220369047615),
+    ("Dallas Panthers",      "DAL",  1483306097535225956),
+]
+
 async def init_db():
     db = await get_db()
     await db.executescript("""
@@ -75,7 +93,26 @@ async def init_db():
         );
     """)
     await db.commit()
-    print("✅ Database initialized.")
+
+    # Seed teams and link roles
+    for name, abbr, role_id in TEAM_DATA:
+        cur = await db.execute("SELECT id FROM teams WHERE abbreviation=?", (abbr,))
+        row = await cur.fetchone()
+        if not row:
+            cur2 = await db.execute(
+                "INSERT INTO teams (name, abbreviation, owner_id) VALUES (?,?,?)",
+                (name, abbr, 0)
+            )
+            team_id = cur2.lastrowid
+            print(f"  ✅ Seeded team: {name} [{abbr}]")
+        else:
+            team_id = row[0]
+        await db.execute("""
+            INSERT INTO team_roles (team_id, role_id) VALUES (?,?)
+            ON CONFLICT(team_id) DO UPDATE SET role_id=excluded.role_id
+        """, (team_id, role_id))
+    await db.commit()
+    print("✅ Database initialized. All teams and roles ready.")
 
 # ── Helpers ───────────────────────────────────────────────────────
 BRAND_COLOR   = 0x1E90FF
@@ -234,6 +271,50 @@ async def team_delete(interaction: discord.Interaction, abbreviation: str):
     await db.commit()
     await interaction.followup.send(embed=success_embed("Team Deleted", f"**{team[1]}** removed. Players are now free agents."))
 
+
+# ── FRANCHISE OWNERS ──────────────────────────────────────────────
+@bot.tree.command(name="set_owner", description="[ADMIN] Set the franchise owner of a team")
+@app_commands.describe(team_abbr="Team abbreviation", owner="The franchise owner to assign")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_owner(interaction: discord.Interaction, team_abbr: str, owner: discord.Member):
+    await interaction.response.defer()
+    db = await get_db()
+    cur = await db.execute("SELECT id, name FROM teams WHERE abbreviation=?", (team_abbr.upper(),))
+    team = await cur.fetchone()
+    if not team:
+        return await interaction.followup.send(embed=error_embed("Team Not Found", f"No team with abbreviation `{team_abbr.upper()}`."))
+    await db.execute("UPDATE teams SET owner_id=? WHERE id=?", (owner.id, team[0]))
+    await db.commit()
+    e = success_embed("Franchise Owner Set 👑",
+        f"**{owner.display_name}** is now the franchise owner of **{team[1]}** `[{team_abbr.upper()}]`.")
+    e.set_thumbnail(url=owner.display_avatar.url)
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="owners", description="View all franchise owners across the league")
+async def owners(interaction: discord.Interaction):
+    await interaction.response.defer()
+    db = await get_db()
+    cur = await db.execute(
+        "SELECT name, abbreviation, owner_id FROM teams ORDER BY name"
+    )
+    rows = await cur.fetchall()
+    if not rows:
+        return await interaction.followup.send(embed=warn_embed("No Teams", "No teams registered yet."))
+
+    e = base_embed("👑 Franchise Owners", f"**{len(rows)} teams in the league**")
+    lines = []
+    for name, abbr, owner_id in rows:
+        member = interaction.guild.get_member(owner_id)
+        if member:
+            owner_str = f"{member.mention} `{member.display_name}`"
+        elif owner_id and owner_id != 0:
+            owner_str = f"<@{owner_id}>"
+        else:
+            owner_str = "_No owner set_"
+        lines.append(f"**{name}** `[{abbr}]` — {owner_str}")
+    e.description = "\n".join(lines)
+    await interaction.followup.send(embed=e)
+
 # ── PLAYER COMMANDS ───────────────────────────────────────────────
 @bot.tree.command(name="register", description="Register yourself as an HCBB league player")
 @app_commands.describe(position="Your primary position")
@@ -378,9 +459,11 @@ async def free_agents(interaction: discord.Interaction):
     db = await get_db()
     cur = await db.execute("SELECT discord_id, username, position FROM players WHERE free_agent=1 ORDER BY position")
     fas = await cur.fetchall()
+    fa_role = interaction.guild.get_role(FA_ROLE_ID)
+    fa_role_str = f"{fa_role.mention} — " if fa_role else ""
     if not fas:
-        return await interaction.followup.send(embed=warn_embed("No Free Agents", "Everyone is signed!"))
-    e = base_embed("🆓 Free Agent Board", f"**{len(fas)} available players**")
+        return await interaction.followup.send(embed=warn_embed("No Free Agents", f"{fa_role_str}Everyone is signed!"))
+    e = base_embed("🆓 Free Agent Board", f"{fa_role_str}**{len(fas)} available players**")
     lines = [f"{POSITION_EMOJIS.get(pos,'⚾')} **{u}** — {pos}  (<@{did}>)" for did, u, pos in fas]
     e.description += "\n\n" + "\n".join(lines)
     await interaction.followup.send(embed=e)
@@ -702,11 +785,14 @@ class ConfirmView(discord.ui.View):
 @bot.event
 async def on_ready():
     await init_db()
-    guild = discord.Object(id=1464096719867347096)
+    guild = discord.Object(id=GUILD_ID)
+    # Clear global commands to fix duplicates, sync only to guild
+    bot.tree.clear_commands(guild=None)
+    await bot.tree.sync()
     bot.tree.copy_global_to(guild=guild)
     await bot.tree.sync(guild=guild)
     print(f"✅ Logged in as {bot.user}")
-    print("✅ Slash commands synced to guild.")
+    print("✅ Slash commands synced to guild. Global commands cleared.")
     await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.watching, name="⚾ HCBB 9v9 2.0 League"
     ))
