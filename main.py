@@ -6,7 +6,7 @@ import aiosqlite
 import os
 
 TOKEN = os.environ.get("DISCORD_TOKEN", "PASTE_YOUR_TOKEN_HERE")
-DB_PATH = "league.db"
+DB_PATH = "/app/data/league.db"
 
 # ── Persistent DB connection ──────────────────────────────────────
 _db = None
@@ -762,6 +762,82 @@ async def league_config(interaction: discord.Interaction):
         e.add_field(name="🎽 Team Roles", value="\n".join(lines), inline=False)
     else:
         e.add_field(name="🎽 Team Roles", value="None set yet.", inline=False)
+    await interaction.followup.send(embed=e)
+
+
+@bot.tree.command(name="abbreviations", description="View all team abbreviations")
+async def abbreviations(interaction: discord.Interaction):
+    await interaction.response.defer()
+    e = base_embed("📋 Team Abbreviations")
+    lines = [
+        "`IOWA` — Iowa Dream",
+        "`STL`  — St Louis Archers",
+        "`PHI`  — Philadelphia Surge",
+        "`SEA`  — Seattle Sonics",
+        "`BAL`  — Baltimore Ospreys",
+        "`LAR`  — Los Angeles Reapers",
+        "`CHI`  — Chicago Ravens",
+        "`ARI`  — Arizona Firebirds",
+        "`HOU`  — Houston Bulls",
+        "`SDT`  — San Diego Tropics",
+        "`DAL`  — Dallas Panthers",
+    ]
+    e.description = "\n".join(lines)
+    await interaction.followup.send(embed=e)
+
+
+
+@bot.tree.command(name="register_player", description="[ADMIN] Register a player on their behalf")
+@app_commands.describe(player="The player to register", position="Their primary position")
+@app_commands.choices(position=[app_commands.Choice(name=p, value=p) for p in POSITIONS])
+@app_commands.checks.has_permissions(manage_guild=True)
+async def register_player(interaction: discord.Interaction, player: discord.Member, position: str):
+    await interaction.response.defer()
+    db = await get_db()
+    cur = await db.execute("SELECT id FROM players WHERE discord_id=?", (player.id,))
+    if await cur.fetchone():
+        return await interaction.followup.send(embed=warn_embed("Already Registered", f"{player.mention} is already in the league."))
+    await db.execute("INSERT INTO players (discord_id, username, position) VALUES (?,?,?)",
+                     (player.id, player.display_name, position))
+    await db.commit()
+    e = success_embed("Player Registered!", f"{player.mention} registered as **{position}** — now a Free Agent.")
+    e.set_thumbnail(url=player.display_avatar.url)
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="register_all", description="[ADMIN] Register multiple players at once")
+@app_commands.describe(
+    position="Position for all players being registered",
+    players="Mention all players e.g. @user1 @user2 @user3"
+)
+@app_commands.choices(position=[app_commands.Choice(name=p, value=p) for p in POSITIONS])
+@app_commands.checks.has_permissions(manage_guild=True)
+async def register_all(interaction: discord.Interaction, position: str, players: str):
+    import re
+    await interaction.response.defer()
+    db = await get_db()
+    ids = re.findall(r"<@!?([0-9]+)>", players)
+    if not ids:
+        return await interaction.followup.send(embed=error_embed("No Players Found", "Mention players like: @user1 @user2 @user3"))
+    added = []
+    skipped = []
+    for uid in ids:
+        uid = int(uid)
+        member = interaction.guild.get_member(uid)
+        if not member:
+            continue
+        cur = await db.execute("SELECT id FROM players WHERE discord_id=?", (uid,))
+        if await cur.fetchone():
+            skipped.append(member.display_name)
+            continue
+        await db.execute("INSERT INTO players (discord_id, username, position) VALUES (?,?,?)",
+                         (uid, member.display_name, position))
+        added.append(member.display_name)
+    await db.commit()
+    e = success_embed("Bulk Registration Complete")
+    e.add_field(name="Registered (" + str(len(added)) + ")", value=("\n".join(added) if added else "_None_"), inline=False)
+    if skipped:
+        e.add_field(name="Already Registered (" + str(len(skipped)) + ")", value="\n".join(skipped), inline=False)
+    e.add_field(name="Position", value=position, inline=False)
     await interaction.followup.send(embed=e)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
