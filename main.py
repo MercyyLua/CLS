@@ -274,19 +274,19 @@ async def team_delete(interaction: discord.Interaction, abbreviation: str):
 
 # ── FRANCHISE OWNERS ──────────────────────────────────────────────
 @bot.tree.command(name="set_owner", description="[ADMIN] Set the franchise owner of a team")
-@app_commands.describe(team_abbr="Team abbreviation", owner="The franchise owner to assign")
+@app_commands.describe(team="The team role (e.g. @Dallas Panthers)", owner="The franchise owner to assign")
 @app_commands.checks.has_permissions(administrator=True)
-async def set_owner(interaction: discord.Interaction, team_abbr: str, owner: discord.Member):
+async def set_owner(interaction: discord.Interaction, team: discord.Role, owner: discord.Member):
     await interaction.response.defer()
     db = await get_db()
-    cur = await db.execute("SELECT id, name FROM teams WHERE abbreviation=?", (team_abbr.upper(),))
-    team = await cur.fetchone()
-    if not team:
-        return await interaction.followup.send(embed=error_embed("Team Not Found", f"No team with abbreviation `{team_abbr.upper()}`."))
-    await db.execute("UPDATE teams SET owner_id=? WHERE id=?", (owner.id, team[0]))
+    cur = await db.execute("SELECT id, name, abbreviation FROM team_roles tr JOIN teams t ON t.id = tr.team_id WHERE tr.role_id=?", (team.id,))
+    row = await cur.fetchone()
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Team Not Found", f"{team.mention} isn't linked to any team. Use `/set_team_role` first."))
+    await db.execute("UPDATE teams SET owner_id=? WHERE id=?", (owner.id, row[0]))
     await db.commit()
     e = success_embed("Franchise Owner Set 👑",
-        f"**{owner.display_name}** is now the franchise owner of **{team[1]}** `[{team_abbr.upper()}]`.")
+        f"**{owner.display_name}** is now the franchise owner of **{row[1]}** `[{row[2]}]`.")
     e.set_thumbnail(url=owner.display_avatar.url)
     await interaction.followup.send(embed=e)
 
