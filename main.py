@@ -188,6 +188,17 @@ async def swap_team_roles(member, guild, from_team_id, to_team_id):
     await remove_team_role_fn(member, guild, from_team_id)
     await add_team_role(member, guild, to_team_id)
 
+
+async def get_team_by_role(role: discord.Role):
+    db = await get_db()
+    cur = await db.execute("""
+        SELECT t.id, t.name, t.abbreviation, t.owner_id
+        FROM team_roles tr
+        JOIN teams t ON t.id = tr.team_id
+        WHERE tr.role_id=?
+    """, (role.id,))
+    return await cur.fetchone()
+
 # ── Bot ───────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.members = True
@@ -215,22 +226,21 @@ async def team_create(interaction: discord.Interaction, name: str, abbreviation:
     await interaction.followup.send(embed=e)
 
 @bot.tree.command(name="team_info", description="View a team's info and roster")
-@app_commands.describe(name="Team name or abbreviation")
-async def team_info(interaction: discord.Interaction, name: str):
+@app_commands.describe(team="The team role e.g. @Dallas Panthers")
+async def team_info(interaction: discord.Interaction, team: discord.Role):
     await interaction.response.defer()
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Not Found", f"{team.mention} isn't linked to a team."))
     db = await get_db()
-    cur = await db.execute("SELECT * FROM teams WHERE name=? OR abbreviation=?", (name, name.upper()))
-    team = await cur.fetchone()
-    if not team:
-        return await interaction.followup.send(embed=error_embed("Not Found", f"No team named `{name}`."))
-    cur2 = await db.execute("SELECT username, position FROM players WHERE team_id=?", (team[0],))
+    cur2 = await db.execute("SELECT username, position FROM players WHERE team_id=?", (row[0],))
     roster = await cur2.fetchall()
-    owner = interaction.guild.get_member(team[3])
-    e = base_embed(f"⚾ {team[1]}  `{team[2]}`")
-    if team[4]:
-        e.set_thumbnail(url=team[4])
-    e.add_field(name="Owner/GM", value=owner.mention if owner else f"<@{team[3]}>")
-    e.add_field(name="Record", value=f"**{team[5]}W - {team[6]}L**")
+    cur3 = await db.execute("SELECT * FROM teams WHERE id=?", (row[0],))
+    full = await cur3.fetchone()
+    owner = interaction.guild.get_member(row[3])
+    e = base_embed(f"⚾ {row[1]}  `{row[2]}`")
+    e.add_field(name="Owner/GM", value=owner.mention if owner else f"<@{row[3]}>")
+    e.add_field(name="Record", value=f"**{full[5]}W - {full[6]}L**")
     e.add_field(name="Roster Size", value=str(len(roster)))
     if roster:
         lines = [f"{POSITION_EMOJIS.get(pos,'⚾')} **{u}** — {pos}" for u, pos in roster]
@@ -257,19 +267,18 @@ async def standings(interaction: discord.Interaction):
     await interaction.followup.send(embed=e)
 
 @bot.tree.command(name="team_delete", description="[ADMIN] Delete a team")
-@app_commands.describe(abbreviation="Team abbreviation")
+@app_commands.describe(team="The team role e.g. @Dallas Panthers")
 @app_commands.checks.has_permissions(administrator=True)
-async def team_delete(interaction: discord.Interaction, abbreviation: str):
+async def team_delete(interaction: discord.Interaction, team: discord.Role):
     await interaction.response.defer()
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Not Found", f"{team.mention} isn't linked to a team."))
     db = await get_db()
-    cur = await db.execute("SELECT id, name FROM teams WHERE abbreviation=?", (abbreviation.upper(),))
-    team = await cur.fetchone()
-    if not team:
-        return await interaction.followup.send(embed=error_embed("Not Found"))
-    await db.execute("UPDATE players SET team_id=NULL, free_agent=1 WHERE team_id=?", (team[0],))
-    await db.execute("DELETE FROM teams WHERE id=?", (team[0],))
+    await db.execute("UPDATE players SET team_id=NULL, free_agent=1 WHERE team_id=?", (row[0],))
+    await db.execute("DELETE FROM teams WHERE id=?", (row[0],))
     await db.commit()
-    await interaction.followup.send(embed=success_embed("Team Deleted", f"**{team[1]}** removed. Players are now free agents."))
+    await interaction.followup.send(embed=success_embed("Team Deleted", f"**{row[1]}** removed. Players are now free agents."))
 
 
 # ── FRANCHISE OWNERS ──────────────────────────────────────────────
@@ -333,79 +342,77 @@ async def register(interaction: discord.Interaction, position: str):
     await interaction.followup.send(embed=e)
 
 @bot.tree.command(name="sign", description="[GM] Sign a free agent to your team")
-@app_commands.describe(player="Player to sign", team_abbr="Your team abbreviation")
-async def sign(interaction: discord.Interaction, player: discord.Member, team_abbr: str):
+@app_commands.describe(player="Player to sign", team="Your team role e.g. @Dallas Panthers")
+async def sign(interaction: discord.Interaction, player: discord.Member, team: discord.Role):
     await interaction.response.defer()
     config = await get_config(interaction.guild.id)
-    db = await get_db()
-    cur = await db.execute("SELECT id, name FROM teams WHERE abbreviation=? AND owner_id=?",
-                           (team_abbr.upper(), interaction.user.id))
-    team = await cur.fetchone()
-    if not team:
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Not Found", f"{team.mention} isn't linked to a team."))
+    if row[3] != interaction.user.id:
         return await interaction.followup.send(embed=error_embed("Not Authorized", "You don't own that team."))
+    db = await get_db()
     cur2 = await db.execute("SELECT id, username, free_agent, team_id FROM players WHERE discord_id=?", (player.id,))
     p = await cur2.fetchone()
     if not p:
-        return await interaction.followup.send(embed=error_embed("Not Registered", f"{player.mention} hasn't used `/register` yet."))
+        return await interaction.followup.send(embed=error_embed("Not Registered", f"{player.mention} hasn't registered yet."))
     if not p[2]:
         cur3 = await db.execute("SELECT name FROM teams WHERE id=?", (p[3],))
         ct = await cur3.fetchone()
         return await interaction.followup.send(embed=error_embed("Not a Free Agent", f"{player.mention} is already on **{ct[0] if ct else 'a team'}**."))
-    await db.execute("UPDATE players SET team_id=?, free_agent=0 WHERE discord_id=?", (team[0], player.id))
-    await db.execute("INSERT INTO transactions (player_id, to_team, type) VALUES (?,?,?)", (p[0], team[0], "SIGN"))
+    await db.execute("UPDATE players SET team_id=?, free_agent=0 WHERE discord_id=?", (row[0], player.id))
+    await db.execute("INSERT INTO transactions (player_id, to_team, type) VALUES (?,?,?)", (p[0], row[0], "SIGN"))
     await db.commit()
-    await add_team_role(player, interaction.guild, team[0])
-    e = success_embed("Player Signed! ✍️", f"{player.mention} signed to **{team[1]}** `[{team_abbr.upper()}]`!")
+    await add_team_role(player, interaction.guild, row[0])
+    e = success_embed("Player Signed! ✍️", f"{player.mention} signed to **{row[1]}**!")
     e.set_thumbnail(url=player.display_avatar.url)
     await interaction.followup.send(embed=e)
     tx = base_embed("✍️ Transaction Wire", color=0x2ECC71)
     tx.add_field(name="Type", value="**SIGNED**")
     tx.add_field(name="Player", value=f"{player.mention} `{player.display_name}`")
-    tx.add_field(name="Team", value=f"**{team[1]}** `[{team_abbr.upper()}]`")
+    tx.add_field(name="Team", value=f"**{row[1]}** `{team.mention}`")
     tx.set_thumbnail(url=player.display_avatar.url)
     await post_transaction(interaction.guild, config, tx)
 
 @bot.tree.command(name="release", description="[GM] Release a player from your team")
-@app_commands.describe(player="Player to release", team_abbr="Your team abbreviation")
-async def release(interaction: discord.Interaction, player: discord.Member, team_abbr: str):
+@app_commands.describe(player="Player to release", team="Your team role e.g. @Dallas Panthers")
+async def release(interaction: discord.Interaction, player: discord.Member, team: discord.Role):
     await interaction.response.defer()
     config = await get_config(interaction.guild.id)
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Not Found", f"{team.mention} isn't linked to a team."))
+    if row[3] != interaction.user.id:
+        return await interaction.followup.send(embed=error_embed("Not Authorized", "You don't own that team."))
     db = await get_db()
-    cur = await db.execute("SELECT id, name FROM teams WHERE abbreviation=? AND owner_id=?",
-                           (team_abbr.upper(), interaction.user.id))
-    team = await cur.fetchone()
-    if not team:
-        return await interaction.followup.send(embed=error_embed("Not Authorized"))
-    cur2 = await db.execute("SELECT id FROM players WHERE discord_id=? AND team_id=?", (player.id, team[0]))
+    cur2 = await db.execute("SELECT id FROM players WHERE discord_id=? AND team_id=?", (player.id, row[0]))
     p = await cur2.fetchone()
     if not p:
-        return await interaction.followup.send(embed=error_embed("Not On Team", f"{player.mention} isn't on **{team[1]}**."))
+        return await interaction.followup.send(embed=error_embed("Not On Team", f"{player.mention} isn't on **{row[1]}**."))
     await db.execute("UPDATE players SET team_id=NULL, free_agent=1 WHERE discord_id=?", (player.id,))
-    await db.execute("INSERT INTO transactions (player_id, from_team, type) VALUES (?,?,?)", (p[0], team[0], "RELEASE"))
+    await db.execute("INSERT INTO transactions (player_id, from_team, type) VALUES (?,?,?)", (p[0], row[0], "RELEASE"))
     await db.commit()
-    await remove_team_role_fn(player, interaction.guild, team[0])
-    await interaction.followup.send(embed=success_embed("Released 🚪", f"{player.mention} released from **{team[1]}** — now a Free Agent."))
+    await remove_team_role_fn(player, interaction.guild, row[0])
+    await interaction.followup.send(embed=success_embed("Released 🚪", f"{player.mention} released from **{row[1]}** — now a Free Agent."))
     tx = base_embed("🚪 Transaction Wire", color=0xFF6B35)
     tx.add_field(name="Type", value="**RELEASED**")
     tx.add_field(name="Player", value=f"{player.mention} `{player.display_name}`")
-    tx.add_field(name="From", value=f"**{team[1]}** `[{team_abbr.upper()}]`")
+    tx.add_field(name="From", value=f"**{row[1]}** {team.mention}")
     tx.add_field(name="Status", value="🆓 Free Agent")
     tx.set_thumbnail(url=player.display_avatar.url)
     await post_transaction(interaction.guild, config, tx)
 
 @bot.tree.command(name="trade", description="[ADMIN] Trade a player between teams")
-@app_commands.describe(player="Player to trade", from_team="From team abbreviation", to_team="To team abbreviation")
+@app_commands.describe(player="Player to trade", from_team="Team trading the player", to_team="Team receiving the player")
 @app_commands.checks.has_permissions(administrator=True)
-async def trade(interaction: discord.Interaction, player: discord.Member, from_team: str, to_team: str):
+async def trade(interaction: discord.Interaction, player: discord.Member, from_team: discord.Role, to_team: discord.Role):
     await interaction.response.defer()
     config = await get_config(interaction.guild.id)
-    db = await get_db()
-    cur1 = await db.execute("SELECT id, name FROM teams WHERE abbreviation=?", (from_team.upper(),))
-    ft = await cur1.fetchone()
-    cur2 = await db.execute("SELECT id, name FROM teams WHERE abbreviation=?", (to_team.upper(),))
-    tt = await cur2.fetchone()
+    ft = await get_team_by_role(from_team)
+    tt = await get_team_by_role(to_team)
     if not ft or not tt:
-        return await interaction.followup.send(embed=error_embed("Team Not Found"))
+        return await interaction.followup.send(embed=error_embed("Team Not Found", "One or both roles aren't linked to a team."))
+    db = await get_db()
     cur3 = await db.execute("SELECT id FROM players WHERE discord_id=? AND team_id=?", (player.id, ft[0]))
     p = await cur3.fetchone()
     if not p:
@@ -419,8 +426,8 @@ async def trade(interaction: discord.Interaction, player: discord.Member, from_t
     tx = base_embed("🔄 Transaction Wire", color=0x9B59B6)
     tx.add_field(name="Type", value="**TRADED**")
     tx.add_field(name="Player", value=f"{player.mention} `{player.display_name}`")
-    tx.add_field(name="From", value=f"**{ft[1]}** `[{from_team.upper()}]`", inline=False)
-    tx.add_field(name="To", value=f"**{tt[1]}** `[{to_team.upper()}]`")
+    tx.add_field(name="From", value=f"**{ft[1]}** {from_team.mention}", inline=False)
+    tx.add_field(name="To", value=f"**{tt[1]}** {to_team.mention}")
     tx.set_thumbnail(url=player.display_avatar.url)
     await post_transaction(interaction.guild, config, tx)
 
@@ -499,19 +506,17 @@ async def transactions(interaction: discord.Interaction):
 
 # ── GAME COMMANDS ─────────────────────────────────────────────────
 @bot.tree.command(name="schedule_game", description="[MOD] Schedule a game")
-@app_commands.describe(home="Home team abbreviation", away="Away team abbreviation", date="Date/time e.g. June 15 8PM")
+@app_commands.describe(home="Home team role", away="Away team role", date="Date/time e.g. June 15 8PM")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def schedule_game(interaction: discord.Interaction, home: str, away: str, date: str = None):
+async def schedule_game(interaction: discord.Interaction, home: discord.Role, away: discord.Role, date: str = None):
     await interaction.response.defer()
-    db = await get_db()
-    cur1 = await db.execute("SELECT id, name FROM teams WHERE abbreviation=?", (home.upper(),))
-    ht = await cur1.fetchone()
-    cur2 = await db.execute("SELECT id, name FROM teams WHERE abbreviation=?", (away.upper(),))
-    at = await cur2.fetchone()
+    ht = await get_team_by_role(home)
+    at = await get_team_by_role(away)
     if not ht or not at:
-        return await interaction.followup.send(embed=error_embed("Team Not Found", "Check abbreviations."))
+        return await interaction.followup.send(embed=error_embed("Team Not Found", "One or both roles aren't linked to a team."))
     if ht[0] == at[0]:
         return await interaction.followup.send(embed=error_embed("Same Team"))
+    db = await get_db()
     cur3 = await db.execute("INSERT INTO games (home_team_id, away_team_id, status, scheduled_at) VALUES (?,?,?,?)",
                             (ht[0], at[0], "scheduled", date))
     await db.commit()
@@ -711,7 +716,7 @@ async def set_transactions_channel(interaction: discord.Interaction, channel: di
     await interaction.followup.send(embed=success_embed("Channel Set ✅", f"Transactions will post in {channel.mention}."))
 
 @bot.tree.command(name="set_team_role", description="[ADMIN] Link a Discord role to a team")
-@app_commands.describe(team_abbr="Team abbreviation", role="Role to assign to players on this team")
+@app_commands.describe(team_abbr="Team abbreviation (e.g. DAL)", role="Role to assign to players on this team")
 @app_commands.checks.has_permissions(administrator=True)
 async def set_team_role(interaction: discord.Interaction, team_abbr: str, role: discord.Role):
     await interaction.response.defer()
@@ -726,21 +731,20 @@ async def set_team_role(interaction: discord.Interaction, team_abbr: str, role: 
     """, (team[0], role.id))
     await db.commit()
     await interaction.followup.send(embed=success_embed("Team Role Linked 🎽",
-        f"{role.mention} linked to **{team[1]}** `[{team_abbr.upper()}]`."))
+        f"{role.mention} linked to **{team[1]}**."))
 
 @bot.tree.command(name="remove_team_role", description="[ADMIN] Unlink a role from a team")
-@app_commands.describe(team_abbr="Team abbreviation")
+@app_commands.describe(role="The team role to unlink")
 @app_commands.checks.has_permissions(administrator=True)
-async def remove_team_role(interaction: discord.Interaction, team_abbr: str):
+async def remove_team_role(interaction: discord.Interaction, role: discord.Role):
     await interaction.response.defer()
+    row = await get_team_by_role(role)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Not Found", f"{role.mention} isn't linked to any team."))
     db = await get_db()
-    cur = await db.execute("SELECT id, name FROM teams WHERE abbreviation=?", (team_abbr.upper(),))
-    team = await cur.fetchone()
-    if not team:
-        return await interaction.followup.send(embed=error_embed("Team Not Found"))
-    await db.execute("DELETE FROM team_roles WHERE team_id=?", (team[0],))
+    await db.execute("DELETE FROM team_roles WHERE team_id=?", (row[0],))
     await db.commit()
-    await interaction.followup.send(embed=success_embed("Role Removed", f"Role unlinked from **{team[1]}**."))
+    await interaction.followup.send(embed=success_embed("Role Removed", f"Role unlinked from **{row[1]}**."))
 
 @bot.tree.command(name="league_config", description="[ADMIN] View current bot config")
 @app_commands.checks.has_permissions(administrator=True)
