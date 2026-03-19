@@ -786,13 +786,14 @@ class ConfirmView(discord.ui.View):
 async def on_ready():
     await init_db()
     guild = discord.Object(id=GUILD_ID)
-    # Clear global commands to fix duplicates, sync only to guild
+    # Wipe global AND guild commands then re-sync fresh
     bot.tree.clear_commands(guild=None)
-    await bot.tree.sync()
+    bot.tree.clear_commands(guild=guild)
+    await bot.tree.sync(guild=None)
     bot.tree.copy_global_to(guild=guild)
-    await bot.tree.sync(guild=guild)
+    synced = await bot.tree.sync(guild=guild)
     print(f"✅ Logged in as {bot.user}")
-    print("✅ Slash commands synced to guild. Global commands cleared.")
+    print(f"✅ Synced {len(synced)} slash commands to guild.")
     await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.watching, name="⚾ HCBB 9v9 2.0 League"
     ))
