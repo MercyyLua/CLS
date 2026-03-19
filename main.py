@@ -804,36 +804,30 @@ async def register_player(interaction: discord.Interaction, player: discord.Memb
     e.set_thumbnail(url=player.display_avatar.url)
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="register_all", description="[ADMIN] Register every member of a role as a player")
-@app_commands.describe(
-    role="The role whose members will all be registered",
-    position="Position to assign to all of them"
-)
+@bot.tree.command(name="register_all", description="[ADMIN] Register all members of the server as free agents")
+@app_commands.describe(position="Position to assign to everyone")
 @app_commands.choices(position=[app_commands.Choice(name=p, value=p) for p in POSITIONS])
 @app_commands.checks.has_permissions(manage_guild=True)
-async def register_all(interaction: discord.Interaction, role: discord.Role, position: str):
-    # Respond immediately so Discord doesnt time out
+async def register_all(interaction: discord.Interaction, position: str):
     await interaction.response.send_message(
-        embed=base_embed("⏳ Registering...", f"Processing {role.mention} members, please wait..."),
-        ephemeral=False
+        embed=base_embed("⏳ Registering...", "Processing all server members, please wait..."),
     )
     db = await get_db()
-    members = [m for m in role.members if not m.bot]
-    if not members:
-        return await interaction.edit_original_response(embed=error_embed("No Members", f"{role.mention} has no members."))
 
+    # Get existing player IDs
     cur = await db.execute("SELECT discord_id FROM players")
     existing = set(row[0] for row in await cur.fetchall())
 
-    added = []
     to_insert = []
-    skipped = []
-    for member in members:
+    skipped = 0
+    # Use guild members cached by discord.py — no API call needed
+    for member in interaction.guild.members:
+        if member.bot:
+            continue
         if member.id in existing:
-            skipped.append(member.display_name)
-        else:
-            to_insert.append((member.id, member.display_name, position))
-            added.append(member.display_name)
+            skipped += 1
+            continue
+        to_insert.append((member.id, member.display_name, position))
 
     if to_insert:
         await db.executemany(
@@ -843,11 +837,10 @@ async def register_all(interaction: discord.Interaction, role: discord.Role, pos
         await db.commit()
 
     e = success_embed("Bulk Registration Complete")
-    e.add_field(name="Role", value=role.mention, inline=False)
     e.add_field(name="Position", value=position, inline=False)
-    e.add_field(name="Registered (" + str(len(added)) + ")", value=("\n".join(added) if added else "_None_"), inline=False)
-    if skipped:
-        e.add_field(name="Already Registered (" + str(len(skipped)) + ")", value="\n".join(skipped), inline=False)
+    e.add_field(name="Registered", value=str(len(to_insert)), inline=True)
+    e.add_field(name="Already Registered", value=str(skipped), inline=True)
+    e.add_field(name="Total Members", value=str(len(to_insert) + skipped), inline=True)
     await interaction.edit_original_response(embed=e)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
