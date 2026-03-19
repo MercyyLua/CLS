@@ -804,40 +804,36 @@ async def register_player(interaction: discord.Interaction, player: discord.Memb
     e.set_thumbnail(url=player.display_avatar.url)
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="register_all", description="[ADMIN] Register multiple players at once")
+@bot.tree.command(name="register_all", description="[ADMIN] Register every member of a role as a player")
 @app_commands.describe(
-    position="Position for all players being registered",
-    players="Mention all players e.g. @user1 @user2 @user3"
+    role="The role whose members will all be registered",
+    position="Position to assign to all of them"
 )
 @app_commands.choices(position=[app_commands.Choice(name=p, value=p) for p in POSITIONS])
 @app_commands.checks.has_permissions(manage_guild=True)
-async def register_all(interaction: discord.Interaction, position: str, players: str):
-    import re
+async def register_all(interaction: discord.Interaction, role: discord.Role, position: str):
     await interaction.response.defer()
     db = await get_db()
-    ids = re.findall(r"<@!?([0-9]+)>", players)
-    if not ids:
-        return await interaction.followup.send(embed=error_embed("No Players Found", "Mention players like: @user1 @user2 @user3"))
+    members = [m for m in role.members if not m.bot]
+    if not members:
+        return await interaction.followup.send(embed=error_embed("No Members", f"{role.mention} has no members to register."))
     added = []
     skipped = []
-    for uid in ids:
-        uid = int(uid)
-        member = interaction.guild.get_member(uid)
-        if not member:
-            continue
-        cur = await db.execute("SELECT id FROM players WHERE discord_id=?", (uid,))
+    for member in members:
+        cur = await db.execute("SELECT id FROM players WHERE discord_id=?", (member.id,))
         if await cur.fetchone():
             skipped.append(member.display_name)
             continue
         await db.execute("INSERT INTO players (discord_id, username, position) VALUES (?,?,?)",
-                         (uid, member.display_name, position))
+                         (member.id, member.display_name, position))
         added.append(member.display_name)
     await db.commit()
     e = success_embed("Bulk Registration Complete")
+    e.add_field(name="Role", value=role.mention, inline=False)
+    e.add_field(name="Position", value=position, inline=False)
     e.add_field(name="Registered (" + str(len(added)) + ")", value=("\n".join(added) if added else "_None_"), inline=False)
     if skipped:
         e.add_field(name="Already Registered (" + str(len(skipped)) + ")", value="\n".join(skipped), inline=False)
-    e.add_field(name="Position", value=position, inline=False)
     await interaction.followup.send(embed=e)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
