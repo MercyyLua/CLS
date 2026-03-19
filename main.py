@@ -785,10 +785,10 @@ class ConfirmView(discord.ui.View):
 @bot.event
 async def on_ready():
     await init_db()
-    guild = discord.Object(id=GUILD_ID)
-    synced = await bot.tree.sync(guild=guild)
+    # Sync globally — shows up in all servers, no guild copy needed
+    synced = await bot.tree.sync()
     print(f"✅ Logged in as {bot.user}")
-    print(f"✅ Synced {len(synced)} commands to guild.")
+    print(f"✅ Synced {len(synced)} commands globally.")
     await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.watching, name="⚾ HCBB 9v9 2.0 League"
     ))
