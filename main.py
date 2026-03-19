@@ -816,18 +816,29 @@ async def register_all(interaction: discord.Interaction, role: discord.Role, pos
     db = await get_db()
     members = [m for m in role.members if not m.bot]
     if not members:
-        return await interaction.followup.send(embed=error_embed("No Members", f"{role.mention} has no members to register."))
+        return await interaction.followup.send(embed=error_embed("No Members", f"{role.mention} has no members."))
+
+    # Fetch all existing player IDs in one query
+    cur = await db.execute("SELECT discord_id FROM players")
+    existing = set(row[0] for row in await cur.fetchall())
+
     added = []
+    to_insert = []
     skipped = []
     for member in members:
-        cur = await db.execute("SELECT id FROM players WHERE discord_id=?", (member.id,))
-        if await cur.fetchone():
+        if member.id in existing:
             skipped.append(member.display_name)
-            continue
-        await db.execute("INSERT INTO players (discord_id, username, position) VALUES (?,?,?)",
-                         (member.id, member.display_name, position))
-        added.append(member.display_name)
-    await db.commit()
+        else:
+            to_insert.append((member.id, member.display_name, position))
+            added.append(member.display_name)
+
+    if to_insert:
+        await db.executemany(
+            "INSERT OR IGNORE INTO players (discord_id, username, position) VALUES (?,?,?)",
+            to_insert
+        )
+        await db.commit()
+
     e = success_embed("Bulk Registration Complete")
     e.add_field(name="Role", value=role.mention, inline=False)
     e.add_field(name="Position", value=position, inline=False)
