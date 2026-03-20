@@ -226,27 +226,28 @@ async def team_create(interaction: discord.Interaction, name: str, abbreviation:
     await interaction.followup.send(embed=e)
 
 @bot.tree.command(name="team_info", description="View a team's info and roster")
-@app_commands.describe(team="The team role e.g. @Dallas Panthers")
+@app_commands.describe(team="The team")
 async def team_info(interaction: discord.Interaction, team: discord.Role):
     await interaction.response.defer()
     row = await get_team_by_role(team)
     if not row:
         return await interaction.followup.send(embed=error_embed("Not Found", f"{team.mention} isn't linked to a team."))
     db = await get_db()
-    cur2 = await db.execute("SELECT username, position FROM players WHERE team_id=?", (row[0],))
+    cur2 = await db.execute("SELECT username, position FROM players WHERE team_id=? ORDER BY position", (row[0],))
     roster = await cur2.fetchall()
     cur3 = await db.execute("SELECT * FROM teams WHERE id=?", (row[0],))
     full = await cur3.fetchone()
     owner = interaction.guild.get_member(row[3])
-    e = base_embed(f"⚾ {row[1]}  `{row[2]}`")
-    e.add_field(name="Owner/GM", value=owner.mention if owner else f"<@{row[3]}>")
-    e.add_field(name="Record", value=f"**{full[5]}W - {full[6]}L**")
-    e.add_field(name="Roster Size", value=str(len(roster)))
+    e = discord.Embed(title=f"⚾  {row[1]}", color=team.color if team.color.value else BRAND_COLOR)
+    e.add_field(name="👑 Owner", value=owner.mention if owner else f"<@{row[3]}>", inline=True)
+    e.add_field(name="📊 Record", value=f"**{full[5]}W — {full[6]}L**", inline=True)
+    e.add_field(name="👥 Roster", value=f"**{len(roster)}/20**", inline=True)
     if roster:
-        lines = [f"{POSITION_EMOJIS.get(pos,'⚾')} **{u}** — {pos}" for u, pos in roster]
-        e.add_field(name="Roster", value="\n".join(lines), inline=False)
+        lines = [f"{POSITION_EMOJIS.get(pos,'⚾')} **{u}** — `{pos}`" for u, pos in roster]
+        e.add_field(name="Players", value="\n".join(lines), inline=False)
     else:
-        e.add_field(name="Roster", value="_No players yet._", inline=False)
+        e.add_field(name="Players", value="_No players signed yet._", inline=False)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
 @bot.tree.command(name="standings", description="View league standings")
@@ -257,13 +258,16 @@ async def standings(interaction: discord.Interaction):
     rows = await cur.fetchall()
     if not rows:
         return await interaction.followup.send(embed=warn_embed("No Teams Yet"))
-    e = base_embed("🏆 League Standings")
     medals = ["🥇","🥈","🥉"] + [f"`{i}.`" for i in range(4, 20)]
     lines = []
     for i, (name, abbr, w, l) in enumerate(rows, 1):
-        pct = (w / (w+l)) if (w+l) else 0.0
-        lines.append(f"{medals[i-1]} **{name}** `{abbr}` — {w}W {l}L  *(PCT: {pct:.3f})*")
-    e.description = "\n".join(lines)
+        total = w + l
+        pct = (w / total) if total else 0.0
+        gb = ((rows[0][2] - rows[0][3]) - (w - l)) / 2 if i > 1 else "-"
+        gb_str = f"GB: {gb:.1f}" if isinstance(gb, float) else "GB: —"
+        lines.append(f"{medals[i-1]} **{name}** — `{w}W {l}L` · PCT: `{pct:.3f}` · {gb_str}")
+    e = discord.Embed(title="🏆  League Standings", description="\n".join(lines), color=0xFFD700)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
 @bot.tree.command(name="team_delete", description="[ADMIN] Delete a team")
@@ -303,25 +307,21 @@ async def set_owner(interaction: discord.Interaction, team: discord.Role, owner:
 async def owners(interaction: discord.Interaction):
     await interaction.response.defer()
     db = await get_db()
-    cur = await db.execute(
-        "SELECT name, abbreviation, owner_id FROM teams ORDER BY name"
-    )
+    cur = await db.execute("SELECT name, abbreviation, owner_id FROM teams ORDER BY name")
     rows = await cur.fetchall()
     if not rows:
         return await interaction.followup.send(embed=warn_embed("No Teams", "No teams registered yet."))
-
-    e = base_embed("👑 Franchise Owners", f"**{len(rows)} teams in the league**")
-    lines = []
+    e = discord.Embed(title="👑  Franchise Owners", color=0xFFD700)
     for name, abbr, owner_id in rows:
         member = interaction.guild.get_member(owner_id)
         if member:
-            owner_str = f"{member.mention} `{member.display_name}`"
+            val = f"{member.mention}"
         elif owner_id and owner_id != 0:
-            owner_str = f"<@{owner_id}>"
+            val = f"<@{owner_id}>"
         else:
-            owner_str = "_No owner set_"
-        lines.append(f"**{name}** `[{abbr}]` — {owner_str}")
-    e.description = "\n".join(lines)
+            val = "_Not set_"
+        e.add_field(name=f"{name}", value=val, inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
 # ── PLAYER COMMANDS ───────────────────────────────────────────────
@@ -341,68 +341,90 @@ async def register(interaction: discord.Interaction, position: str):
     e.set_thumbnail(url=interaction.user.display_avatar.url)
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="sign", description="[GM] Sign a free agent to your team")
-@app_commands.describe(player="Player to sign", team="Your team role e.g. @Dallas Panthers")
+@bot.tree.command(name="sign", description="Sign a free agent to your team")
+@app_commands.describe(player="Player to sign", team="Your team")
 async def sign(interaction: discord.Interaction, player: discord.Member, team: discord.Role):
     await interaction.response.defer()
     config = await get_config(interaction.guild.id)
     row = await get_team_by_role(team)
     if not row:
-        return await interaction.followup.send(embed=error_embed("Not Found", f"{team.mention} isn't linked to a team."))
+        return await interaction.followup.send(embed=error_embed("Team Not Found", f"{team.mention} isn't linked to a team."))
     if row[3] != interaction.user.id:
-        return await interaction.followup.send(embed=error_embed("Not Authorized", "You don't own that team."))
+        return await interaction.followup.send(embed=error_embed("Not Authorized", "You must be the franchise owner to sign players."))
     db = await get_db()
-    cur2 = await db.execute("SELECT id, username, free_agent, team_id FROM players WHERE discord_id=?", (player.id,))
+    # Check roster size
+    cur_count = await db.execute("SELECT COUNT(*) FROM players WHERE team_id=?", (row[0],))
+    count = (await cur_count.fetchone())[0]
+    if count >= 20:
+        return await interaction.followup.send(embed=error_embed("Roster Full", f"**{row[1]}** already has **{count}/20** players. Release someone first."))
+    cur2 = await db.execute("SELECT id, username, free_agent, team_id, position FROM players WHERE discord_id=?", (player.id,))
     p = await cur2.fetchone()
     if not p:
-        return await interaction.followup.send(embed=error_embed("Not Registered", f"{player.mention} hasn't registered yet."))
+        return await interaction.followup.send(embed=error_embed("Not Registered", f"{player.mention} hasn't registered yet. They need to use `/register` first."))
     if not p[2]:
         cur3 = await db.execute("SELECT name FROM teams WHERE id=?", (p[3],))
         ct = await cur3.fetchone()
-        return await interaction.followup.send(embed=error_embed("Not a Free Agent", f"{player.mention} is already on **{ct[0] if ct else 'a team'}**."))
+        return await interaction.followup.send(embed=error_embed("Not a Free Agent", f"{player.mention} is already on **{ct[0] if ct else 'a team'}**. They must be released first."))
     await db.execute("UPDATE players SET team_id=?, free_agent=0 WHERE discord_id=?", (row[0], player.id))
     await db.execute("INSERT INTO transactions (player_id, to_team, type) VALUES (?,?,?)", (p[0], row[0], "SIGN"))
     await db.commit()
     await add_team_role(player, interaction.guild, row[0])
-    e = success_embed("Player Signed! ✍️", f"{player.mention} signed to **{row[1]}**!")
+    e = discord.Embed(color=0x2ECC71)
+    e.set_author(name="Player Signed", icon_url="https://cdn.discordapp.com/emojis/1234567890.png")
     e.set_thumbnail(url=player.display_avatar.url)
+    e.add_field(name="Player", value=f"{player.mention}", inline=True)
+    e.add_field(name="Position", value=p[4], inline=True)
+    e.add_field(name="Team", value=team.mention, inline=True)
+    e.add_field(name="Roster", value=f"{count+1}/20", inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League • Transaction")
     await interaction.followup.send(embed=e)
-    tx = base_embed("✍️ Transaction Wire", color=0x2ECC71)
-    tx.add_field(name="Type", value="**SIGNED**")
-    tx.add_field(name="Player", value=f"{player.mention} `{player.display_name}`")
-    tx.add_field(name="Team", value=f"**{row[1]}** `{team.mention}`")
+    tx = discord.Embed(color=0x2ECC71)
+    tx.set_author(name="✍️  SIGNED")
     tx.set_thumbnail(url=player.display_avatar.url)
+    tx.add_field(name="Player", value=f"{player.mention} `{player.display_name}`", inline=False)
+    tx.add_field(name="Team", value=team.mention, inline=True)
+    tx.add_field(name="Position", value=p[4], inline=True)
+    tx.set_footer(text="⚾ HCBB 9v9 2.0 League • Transaction Wire")
     await post_transaction(interaction.guild, config, tx)
 
-@bot.tree.command(name="release", description="[GM] Release a player from your team")
-@app_commands.describe(player="Player to release", team="Your team role e.g. @Dallas Panthers")
+@bot.tree.command(name="release", description="Release a player from your team")
+@app_commands.describe(player="Player to release", team="Your team")
 async def release(interaction: discord.Interaction, player: discord.Member, team: discord.Role):
     await interaction.response.defer()
     config = await get_config(interaction.guild.id)
     row = await get_team_by_role(team)
     if not row:
-        return await interaction.followup.send(embed=error_embed("Not Found", f"{team.mention} isn't linked to a team."))
+        return await interaction.followup.send(embed=error_embed("Team Not Found", f"{team.mention} isn't linked to a team."))
     if row[3] != interaction.user.id:
-        return await interaction.followup.send(embed=error_embed("Not Authorized", "You don't own that team."))
+        return await interaction.followup.send(embed=error_embed("Not Authorized", "You must be the franchise owner to release players."))
     db = await get_db()
-    cur2 = await db.execute("SELECT id FROM players WHERE discord_id=? AND team_id=?", (player.id, row[0]))
+    cur2 = await db.execute("SELECT id, position FROM players WHERE discord_id=? AND team_id=?", (player.id, row[0]))
     p = await cur2.fetchone()
     if not p:
-        return await interaction.followup.send(embed=error_embed("Not On Team", f"{player.mention} isn't on **{row[1]}**."))
+        return await interaction.followup.send(embed=error_embed("Not On Team", f"{player.mention} is not on **{row[1]}**."))
     await db.execute("UPDATE players SET team_id=NULL, free_agent=1 WHERE discord_id=?", (player.id,))
     await db.execute("INSERT INTO transactions (player_id, from_team, type) VALUES (?,?,?)", (p[0], row[0], "RELEASE"))
     await db.commit()
     await remove_team_role_fn(player, interaction.guild, row[0])
-    await interaction.followup.send(embed=success_embed("Released 🚪", f"{player.mention} released from **{row[1]}** — now a Free Agent."))
-    tx = base_embed("🚪 Transaction Wire", color=0xFF6B35)
-    tx.add_field(name="Type", value="**RELEASED**")
-    tx.add_field(name="Player", value=f"{player.mention} `{player.display_name}`")
-    tx.add_field(name="From", value=f"**{row[1]}** {team.mention}")
-    tx.add_field(name="Status", value="🆓 Free Agent")
+    e = discord.Embed(color=0xFF6B35)
+    e.set_thumbnail(url=player.display_avatar.url)
+    e.set_author(name="Player Released")
+    e.add_field(name="Player", value=player.mention, inline=True)
+    e.add_field(name="Position", value=p[1], inline=True)
+    e.add_field(name="Former Team", value=team.mention, inline=True)
+    e.add_field(name="Status", value="🆓 Free Agent", inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League • Transaction")
+    await interaction.followup.send(embed=e)
+    tx = discord.Embed(color=0xFF6B35)
+    tx.set_author(name="🚪  RELEASED")
     tx.set_thumbnail(url=player.display_avatar.url)
+    tx.add_field(name="Player", value=f"{player.mention} `{player.display_name}`", inline=False)
+    tx.add_field(name="Former Team", value=team.mention, inline=True)
+    tx.add_field(name="Status", value="🆓 Free Agent", inline=True)
+    tx.set_footer(text="⚾ HCBB 9v9 2.0 League • Transaction Wire")
     await post_transaction(interaction.guild, config, tx)
 
-@bot.tree.command(name="trade", description="[ADMIN] Trade a player between teams")
+@bot.tree.command(name="trade", description="Trade a player between teams")
 @app_commands.describe(player="Player to trade", from_team="Team trading the player", to_team="Team receiving the player")
 @app_commands.checks.has_permissions(administrator=True)
 async def trade(interaction: discord.Interaction, player: discord.Member, from_team: discord.Role, to_team: discord.Role):
@@ -413,7 +435,12 @@ async def trade(interaction: discord.Interaction, player: discord.Member, from_t
     if not ft or not tt:
         return await interaction.followup.send(embed=error_embed("Team Not Found", "One or both roles aren't linked to a team."))
     db = await get_db()
-    cur3 = await db.execute("SELECT id FROM players WHERE discord_id=? AND team_id=?", (player.id, ft[0]))
+    # Check receiving team roster size
+    cur_count = await db.execute("SELECT COUNT(*) FROM players WHERE team_id=?", (tt[0],))
+    count = (await cur_count.fetchone())[0]
+    if count >= 20:
+        return await interaction.followup.send(embed=error_embed("Roster Full", f"**{tt[1]}** already has **{count}/20** players."))
+    cur3 = await db.execute("SELECT id, position FROM players WHERE discord_id=? AND team_id=?", (player.id, ft[0]))
     p = await cur3.fetchone()
     if not p:
         return await interaction.followup.send(embed=error_embed("Player Not Found", f"{player.mention} isn't on **{ft[1]}**."))
@@ -422,13 +449,23 @@ async def trade(interaction: discord.Interaction, player: discord.Member, from_t
                      (p[0], ft[0], tt[0], "TRADE"))
     await db.commit()
     await swap_team_roles(player, interaction.guild, ft[0], tt[0])
-    await interaction.followup.send(embed=success_embed("Trade Complete 🔄", f"{player.mention} traded\n**{ft[1]}** → **{tt[1]}**"))
-    tx = base_embed("🔄 Transaction Wire", color=0x9B59B6)
-    tx.add_field(name="Type", value="**TRADED**")
-    tx.add_field(name="Player", value=f"{player.mention} `{player.display_name}`")
-    tx.add_field(name="From", value=f"**{ft[1]}** {from_team.mention}", inline=False)
-    tx.add_field(name="To", value=f"**{tt[1]}** {to_team.mention}")
+    e = discord.Embed(color=0x9B59B6)
+    e.set_author(name="Trade Completed")
+    e.set_thumbnail(url=player.display_avatar.url)
+    e.add_field(name="Player", value=player.mention, inline=True)
+    e.add_field(name="Position", value=p[1], inline=True)
+    e.add_field(name="​", value="​", inline=True)
+    e.add_field(name="From", value=from_team.mention, inline=True)
+    e.add_field(name="To", value=to_team.mention, inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League • Transaction")
+    await interaction.followup.send(embed=e)
+    tx = discord.Embed(color=0x9B59B6)
+    tx.set_author(name="🔄  TRADED")
     tx.set_thumbnail(url=player.display_avatar.url)
+    tx.add_field(name="Player", value=f"{player.mention} `{player.display_name}`", inline=False)
+    tx.add_field(name="From", value=from_team.mention, inline=True)
+    tx.add_field(name="→ To", value=to_team.mention, inline=True)
+    tx.set_footer(text="⚾ HCBB 9v9 2.0 League • Transaction Wire")
     await post_transaction(interaction.guild, config, tx)
 
 @bot.tree.command(name="profile", description="View a player's profile and stats")
@@ -440,24 +477,28 @@ async def profile(interaction: discord.Interaction, player: discord.Member = Non
     cur = await db.execute("SELECT * FROM players WHERE discord_id=?", (target.id,))
     p = await cur.fetchone()
     if not p:
-        return await interaction.followup.send(embed=error_embed("Not Registered", f"{target.mention} hasn't registered."))
-    team_name = "Free Agent 🆓"
+        return await interaction.followup.send(embed=error_embed("Not Registered", f"{target.mention} hasn't registered yet."))
+    team_name = "🆓 Free Agent"
+    team_color = BRAND_COLOR
     if p[4]:
         cur2 = await db.execute("SELECT name, abbreviation FROM teams WHERE id=?", (p[4],))
         t = await cur2.fetchone()
-        team_name = f"{t[0]} `[{t[1]}]`" if t else "Free Agent 🆓"
-    e = base_embed(f"{POSITION_EMOJIS.get(p[3],'⚾')} {target.display_name}'s Profile")
+        team_name = f"{t[0]}" if t else "🆓 Free Agent"
+    emoji = POSITION_EMOJIS.get(p[3], "⚾")
+    e = discord.Embed(color=team_color)
+    e.set_author(name=f"{target.display_name}", icon_url=target.display_avatar.url)
     e.set_thumbnail(url=target.display_avatar.url)
-    e.add_field(name="Position", value=p[3])
-    e.add_field(name="Team", value=team_name)
-    e.add_field(name="Games Played", value=str(p[10]))
-    e.add_field(name="── Batting ──", value="\u200b", inline=False)
-    e.add_field(name="AVG", value=f"{p[5]:.3f}")
-    e.add_field(name="HR", value=str(p[6]))
-    e.add_field(name="RBI", value=str(p[7]))
-    e.add_field(name="── Pitching ──", value="\u200b", inline=False)
-    e.add_field(name="ERA", value=f"{p[8]:.2f}")
-    e.add_field(name="K", value=str(p[9]))
+    e.add_field(name="Position", value=f"{emoji} {p[3]}", inline=True)
+    e.add_field(name="Team", value=team_name, inline=True)
+    e.add_field(name="Games", value=str(p[10]), inline=True)
+    e.add_field(name="⸻ Batting", value="\u200b", inline=False)
+    e.add_field(name="AVG", value=f"`{p[5]:.3f}`", inline=True)
+    e.add_field(name="HR", value=f"`{p[6]}`", inline=True)
+    e.add_field(name="RBI", value=f"`{p[7]}`", inline=True)
+    e.add_field(name="⸻ Pitching", value="\u200b", inline=False)
+    e.add_field(name="ERA", value=f"`{p[8]:.2f}`", inline=True)
+    e.add_field(name="K", value=f"`{p[9]}`", inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
 @bot.tree.command(name="free_agents", description="List all free agents")
