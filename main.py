@@ -19,8 +19,9 @@ async def get_db() -> aiosqlite.Connection:
     return _db
 
 # ── Pre-configured teams and roles ───────────────────────────────
-GUILD_ID      = 1464096719867347096
-FA_ROLE_ID    = 1464129524210995325
+GUILD_ID        = 1464096719867347096
+FA_ROLE_ID      = 1464129524210995325
+MANAGER_ROLE_ID = 1484655385607540989
 
 TEAM_DATA = [
     ("Iowa Dream",           "IOWA", 1478105341899051028),
@@ -90,6 +91,11 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS team_roles (
             team_id INTEGER PRIMARY KEY REFERENCES teams(id),
             role_id INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS team_managers (
+            team_id    INTEGER REFERENCES teams(id),
+            discord_id INTEGER NOT NULL,
+            PRIMARY KEY (team_id, discord_id)
         );
     """)
     await db.commit()
@@ -188,6 +194,13 @@ async def swap_team_roles(member, guild, from_team_id, to_team_id):
     await remove_team_role_fn(member, guild, from_team_id)
     await add_team_role(member, guild, to_team_id)
 
+
+def is_team_manager(interaction: discord.Interaction) -> bool:
+    """Returns True if the user has the Manager role or is an admin."""
+    manager_role = interaction.guild.get_role(MANAGER_ROLE_ID)
+    if manager_role and manager_role in interaction.user.roles:
+        return True
+    return interaction.user.guild_permissions.administrator
 
 async def get_team_by_role(role: discord.Role):
     db = await get_db()
@@ -887,6 +900,111 @@ async def register_all(interaction: discord.Interaction, position: str):
     e.add_field(name="Already Registered", value=str(skipped), inline=True)
     e.add_field(name="Total Members", value=str(len(to_insert) + skipped), inline=True)
     await interaction.edit_original_response(embed=e)
+
+
+@bot.tree.command(name="set_manager", description="[OWNER] Appoint a player as team manager")
+@app_commands.describe(team="Your team", manager="The player to appoint as manager")
+async def set_manager(interaction: discord.Interaction, team: discord.Role, manager: discord.Member):
+    await interaction.response.defer()
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Team Not Found", f"{team.mention} isn't linked to a team."))
+    # Only team owner or admin can appoint
+    if row[3] != interaction.user.id and not interaction.user.guild_permissions.administrator:
+        return await interaction.followup.send(embed=error_embed("Not Authorized", "Only the team owner can appoint a manager."))
+    # Give them the manager role
+    manager_role = interaction.guild.get_role(MANAGER_ROLE_ID)
+    if manager_role:
+        try:
+            await manager.add_roles(manager_role, reason=f"HCBB: Appointed manager of {row[1]}")
+        except discord.Forbidden:
+            return await interaction.followup.send(embed=error_embed("Permission Error", "Bot can't assign the manager role. Make sure bot role is above it."))
+    # Store manager in DB
+    db = await get_db()
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS team_managers (
+            team_id    INTEGER REFERENCES teams(id),
+            discord_id INTEGER NOT NULL,
+            PRIMARY KEY (team_id, discord_id)
+        )
+    """)
+    await db.execute("INSERT OR IGNORE INTO team_managers (team_id, discord_id) VALUES (?,?)", (row[0], manager.id))
+    await db.commit()
+
+    e = discord.Embed(color=0xF1C40F)
+    e.set_author(name="👔 Manager Appointed", icon_url=manager.display_avatar.url)
+    e.set_thumbnail(url=manager.display_avatar.url)
+    e.add_field(name="Manager", value=manager.mention, inline=True)
+    e.add_field(name="Team", value=team.mention, inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="remove_manager", description="[OWNER] Remove a team manager")
+@app_commands.describe(team="Your team", manager="The manager to remove")
+async def remove_manager(interaction: discord.Interaction, team: discord.Role, manager: discord.Member):
+    await interaction.response.defer()
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Team Not Found", f"{team.mention} isn't linked to a team."))
+    if row[3] != interaction.user.id and not interaction.user.guild_permissions.administrator:
+        return await interaction.followup.send(embed=error_embed("Not Authorized", "Only the team owner can remove a manager."))
+    db = await get_db()
+    await db.execute("DELETE FROM team_managers WHERE team_id=? AND discord_id=?", (row[0], manager.id))
+    await db.commit()
+    # Check if they manage any other teams, if not remove the role
+    cur = await db.execute("SELECT COUNT(*) FROM team_managers WHERE discord_id=?", (manager.id,))
+    count = (await cur.fetchone())[0]
+    if count == 0:
+        manager_role = interaction.guild.get_role(MANAGER_ROLE_ID)
+        if manager_role and manager_role in manager.roles:
+            try:
+                await manager.remove_roles(manager_role, reason="HCBB: Manager removed")
+            except discord.Forbidden:
+                pass
+
+    e = discord.Embed(color=0xFF6B35)
+    e.set_author(name="👔 Manager Removed", icon_url=manager.display_avatar.url)
+    e.add_field(name="Manager", value=manager.mention, inline=True)
+    e.add_field(name="Team", value=team.mention, inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="managers", description="View all team managers in the league")
+async def managers(interaction: discord.Interaction):
+    await interaction.response.defer()
+    db = await get_db()
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS team_managers (
+            team_id    INTEGER REFERENCES teams(id),
+            discord_id INTEGER NOT NULL,
+            PRIMARY KEY (team_id, discord_id)
+        )
+    """)
+    cur = await db.execute("""
+        SELECT t.name, tm.discord_id
+        FROM team_managers tm
+        JOIN teams t ON t.id = tm.team_id
+        ORDER BY t.name
+    """)
+    rows = await cur.fetchall()
+    if not rows:
+        return await interaction.followup.send(embed=warn_embed("No Managers", "No managers have been appointed yet."))
+    e = discord.Embed(title="👔  Team Managers", color=0xF1C40F)
+    current_team = None
+    lines = []
+    team_lines = []
+    for team_name, discord_id in rows:
+        if team_name != current_team:
+            if current_team and team_lines:
+                lines.append(f"**{current_team}**\n" + "\n".join(team_lines))
+            current_team = team_name
+            team_lines = []
+        team_lines.append(f"└ <@{discord_id}>")
+    if current_team and team_lines:
+        lines.append(f"**{current_team}**\n" + "\n".join(team_lines))
+    e.description = "\n\n".join(lines)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
