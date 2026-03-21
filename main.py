@@ -6,7 +6,7 @@ import aiosqlite
 import os
 
 TOKEN = os.environ.get("DISCORD_TOKEN", "PASTE_YOUR_TOKEN_HERE")
-DB_PATH = "/app/data/league.db"
+DB_PATH = os.environ.get("DB_PATH", "/app/data/league.db")
 
 # ── Persistent DB connection ──────────────────────────────────────
 _db = None
