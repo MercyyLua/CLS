@@ -640,37 +640,60 @@ async def schedule_game(interaction: discord.Interaction, home: discord.Role, aw
         e.add_field(name="📅 Date/Time", value=date)
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="report_game", description="[MOD] Report a game result")
-@app_commands.describe(game_id="Game ID", home_score="Home score", away_score="Away score")
+@bot.tree.command(name="report_game", description="[MOD] Report a game result by selecting teams")
+@app_commands.describe(
+    home_team="Home team",
+    away_team="Away team",
+    home_score="Home team score",
+    away_score="Away team score"
+)
 @app_commands.checks.has_permissions(manage_guild=True)
-async def report_game(interaction: discord.Interaction, game_id: int, home_score: int, away_score: int):
+async def report_game(interaction: discord.Interaction, home_team: discord.Role, away_team: discord.Role, home_score: int, away_score: int):
     await interaction.response.defer()
+    ht = await get_team_by_role(home_team)
+    at = await get_team_by_role(away_team)
+    if not ht or not at:
+        return await interaction.followup.send(embed=error_embed("Team Not Found", "One or both roles aren't linked to a team."))
     db = await get_db()
-    cur = await db.execute("SELECT id, home_team_id, away_team_id, status FROM games WHERE id=?", (game_id,))
+    # Find the scheduled game between these two teams
+    cur = await db.execute("""
+        SELECT id FROM games
+        WHERE ((home_team_id=? AND away_team_id=?) OR (home_team_id=? AND away_team_id=?))
+        AND status='scheduled'
+        ORDER BY id ASC LIMIT 1
+    """, (ht[0], at[0], at[0], ht[0]))
     game = await cur.fetchone()
-    if not game:
-        return await interaction.followup.send(embed=error_embed("Game Not Found"))
-    if game[3] == "final":
-        return await interaction.followup.send(embed=warn_embed("Already Reported"))
-    await db.execute("UPDATE games SET home_score=?, away_score=?, status='final', played_at=CURRENT_TIMESTAMP WHERE id=?",
-                     (home_score, away_score, game_id))
-    if home_score > away_score:
-        await db.execute("UPDATE teams SET wins=wins+1 WHERE id=?", (game[1],))
-        await db.execute("UPDATE teams SET losses=losses+1 WHERE id=?", (game[2],))
+    if game:
+        game_id = game[0]
+        await db.execute("UPDATE games SET home_score=?, away_score=?, status='final', played_at=CURRENT_TIMESTAMP WHERE id=?",
+                         (home_score, away_score, game_id))
     else:
-        await db.execute("UPDATE teams SET wins=wins+1 WHERE id=?", (game[2],))
-        await db.execute("UPDATE teams SET losses=losses+1 WHERE id=?", (game[1],))
+        # No scheduled game found, just insert a new final
+        cur2 = await db.execute(
+            "INSERT INTO games (home_team_id, away_team_id, home_score, away_score, status, played_at) VALUES (?,?,?,?,'final',CURRENT_TIMESTAMP)",
+            (ht[0], at[0], home_score, away_score)
+        )
+        game_id = cur2.lastrowid
+
+    if home_score > away_score:
+        await db.execute("UPDATE teams SET wins=wins+1 WHERE id=?", (ht[0],))
+        await db.execute("UPDATE teams SET losses=losses+1 WHERE id=?", (at[0],))
+        winner, loser = ht, at
+        w_score, l_score = home_score, away_score
+    else:
+        await db.execute("UPDATE teams SET wins=wins+1 WHERE id=?", (at[0],))
+        await db.execute("UPDATE teams SET losses=losses+1 WHERE id=?", (ht[0],))
+        winner, loser = at, ht
+        w_score, l_score = away_score, home_score
     await db.commit()
-    cur2 = await db.execute("SELECT name, abbreviation FROM teams WHERE id=?", (game[1],))
-    ht = await cur2.fetchone()
-    cur3 = await db.execute("SELECT name, abbreviation FROM teams WHERE id=?", (game[2],))
-    at = await cur3.fetchone()
-    winner = ht if home_score > away_score else at
-    loser  = at if home_score > away_score else ht
-    e = base_embed(f"⚾ Final — Game #{game_id}", color=0xFFD700)
-    e.add_field(name="🏆 Winner", value=f"**{winner[0]}** `{winner[1]}`")
-    e.add_field(name="Score", value=f"**{max(home_score,away_score)} - {min(home_score,away_score)}**")
-    e.add_field(name="❌ Loser", value=f"{loser[0]} `{loser[1]}`")
+
+    e = discord.Embed(color=0xFFD700)
+    e.set_author(name=f"⚾  Final Score — Game #{game_id}")
+    e.description = f"**{at[1]}** vs **{ht[1]}**"
+    e.add_field(name="🏆 Winner", value=f"**{winner[1]}**", inline=True)
+    e.add_field(name="📊 Score", value=f"**{w_score} — {l_score}**", inline=True)
+    e.add_field(name="❌ Loser", value=f"**{loser[1]}**", inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
 @bot.tree.command(name="recent_games", description="View recent game results")
@@ -1067,43 +1090,58 @@ async def managers(interaction: discord.Interaction):
     await interaction.followup.send(embed=e)
 
 
-@bot.tree.command(name="report_score", description="[MOD] Report a game result with player stats")
+@bot.tree.command(name="report_score", description="[MOD] Report a game result with MVP")
 @app_commands.describe(
-    game_id="Game ID to report",
+    home_team="Home team",
+    away_team="Away team",
     home_score="Home team score",
     away_score="Away team score",
     mvp="MVP of the game (optional)"
 )
 @app_commands.checks.has_permissions(manage_guild=True)
-async def report_score(interaction: discord.Interaction, game_id: int, home_score: int, away_score: int, mvp: discord.Member = None):
+async def report_score(interaction: discord.Interaction, home_team: discord.Role, away_team: discord.Role, home_score: int, away_score: int, mvp: discord.Member = None):
     await interaction.response.defer()
+    ht = await get_team_by_role(home_team)
+    at = await get_team_by_role(away_team)
+    if not ht or not at:
+        return await interaction.followup.send(embed=error_embed("Team Not Found", "One or both roles aren't linked to a team."))
     db = await get_db()
-    cur = await db.execute("SELECT id, home_team_id, away_team_id, status FROM games WHERE id=?", (game_id,))
+    cur = await db.execute("""
+        SELECT id FROM games
+        WHERE ((home_team_id=? AND away_team_id=?) OR (home_team_id=? AND away_team_id=?))
+        AND status='scheduled'
+        ORDER BY id ASC LIMIT 1
+    """, (ht[0], at[0], at[0], ht[0]))
     game = await cur.fetchone()
-    if not game:
-        return await interaction.followup.send(embed=error_embed("Game Not Found"))
-    if game[3] == "final":
-        return await interaction.followup.send(embed=warn_embed("Already Reported"))
-    await db.execute("UPDATE games SET home_score=?, away_score=?, status='final', played_at=CURRENT_TIMESTAMP WHERE id=?",
-                     (home_score, away_score, game_id))
-    if home_score > away_score:
-        await db.execute("UPDATE teams SET wins=wins+1 WHERE id=?", (game[1],))
-        await db.execute("UPDATE teams SET losses=losses+1 WHERE id=?", (game[2],))
+    if game:
+        game_id = game[0]
+        await db.execute("UPDATE games SET home_score=?, away_score=?, status='final', played_at=CURRENT_TIMESTAMP WHERE id=?",
+                         (home_score, away_score, game_id))
     else:
-        await db.execute("UPDATE teams SET wins=wins+1 WHERE id=?", (game[2],))
-        await db.execute("UPDATE teams SET losses=losses+1 WHERE id=?", (game[1],))
+        cur2 = await db.execute(
+            "INSERT INTO games (home_team_id, away_team_id, home_score, away_score, status, played_at) VALUES (?,?,?,?,'final',CURRENT_TIMESTAMP)",
+            (ht[0], at[0], home_score, away_score)
+        )
+        game_id = cur2.lastrowid
+
+    if home_score > away_score:
+        await db.execute("UPDATE teams SET wins=wins+1 WHERE id=?", (ht[0],))
+        await db.execute("UPDATE teams SET losses=losses+1 WHERE id=?", (at[0],))
+        winner, loser = ht, at
+        w_score, l_score = home_score, away_score
+    else:
+        await db.execute("UPDATE teams SET wins=wins+1 WHERE id=?", (at[0],))
+        await db.execute("UPDATE teams SET losses=losses+1 WHERE id=?", (ht[0],))
+        winner, loser = at, ht
+        w_score, l_score = away_score, home_score
     await db.commit()
-    cur2 = await db.execute("SELECT name, abbreviation FROM teams WHERE id=?", (game[1],))
-    ht = await cur2.fetchone()
-    cur3 = await db.execute("SELECT name, abbreviation FROM teams WHERE id=?", (game[2],))
-    at = await cur3.fetchone()
-    winner = ht if home_score > away_score else at
-    loser  = at if home_score > away_score else ht
+
     e = discord.Embed(color=0xFFD700)
-    e.set_author(name=f"⚾ Final Score — Game #{game_id}")
-    e.add_field(name="🏆 Winner", value=f"**{winner[0]}**", inline=True)
-    e.add_field(name="Score", value=f"**{max(home_score,away_score)} — {min(home_score,away_score)}**", inline=True)
-    e.add_field(name="❌ Loser", value=f"**{loser[0]}**", inline=True)
+    e.set_author(name="⚾  Final Score", icon_url=mvp.display_avatar.url if mvp else discord.Embed.Empty)
+    e.description = f"**{at[1]}** vs **{ht[1]}**"
+    e.add_field(name="🏆 Winner", value=f"**{winner[1]}**", inline=True)
+    e.add_field(name="📊 Score", value=f"**{w_score} — {l_score}**", inline=True)
+    e.add_field(name="❌ Loser", value=f"**{loser[1]}**", inline=True)
     if mvp:
         e.add_field(name="⭐ MVP", value=mvp.mention, inline=False)
     e.set_footer(text="⚾ HCBB 9v9 2.0 League")
@@ -1406,6 +1444,53 @@ async def force_sign(interaction: discord.Interaction, player: discord.Member, t
     tx.add_field(name="🏟️ Team", value=team.mention, inline=True)
     tx.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await post_transaction(interaction.guild, config, tx)
+
+
+@bot.tree.command(name="clear_schedule", description="[ADMIN] Remove all upcoming scheduled games")
+@app_commands.describe(confirm="Type YES to confirm clearing all scheduled games")
+@app_commands.checks.has_permissions(administrator=True)
+async def clear_schedule(interaction: discord.Interaction, confirm: str):
+    await interaction.response.defer()
+    if confirm.upper() != "YES":
+        return await interaction.followup.send(embed=warn_embed("Cancelled", "Type `YES` to confirm clearing the schedule."))
+    db = await get_db()
+    cur = await db.execute("SELECT COUNT(*) FROM games WHERE status='scheduled'")
+    count = (await cur.fetchone())[0]
+    if count == 0:
+        return await interaction.followup.send(embed=warn_embed("Nothing to Clear", "No scheduled games found."))
+    await db.execute("DELETE FROM games WHERE status='scheduled'")
+    await db.commit()
+    e = discord.Embed(color=0xFF4444)
+    e.set_author(name="🗑️  Schedule Cleared")
+    e.description = f"**{count}** scheduled game(s) have been removed."
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="cancel_game", description="[ADMIN] Cancel a specific scheduled game between two teams")
+@app_commands.describe(home_team="Home team", away_team="Away team")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def cancel_game(interaction: discord.Interaction, home_team: discord.Role, away_team: discord.Role):
+    await interaction.response.defer()
+    ht = await get_team_by_role(home_team)
+    at = await get_team_by_role(away_team)
+    if not ht or not at:
+        return await interaction.followup.send(embed=error_embed("Team Not Found"))
+    db = await get_db()
+    cur = await db.execute("""
+        SELECT id FROM games
+        WHERE ((home_team_id=? AND away_team_id=?) OR (home_team_id=? AND away_team_id=?))
+        AND status='scheduled' ORDER BY id ASC LIMIT 1
+    """, (ht[0], at[0], at[0], ht[0]))
+    game = await cur.fetchone()
+    if not game:
+        return await interaction.followup.send(embed=error_embed("Game Not Found", f"No scheduled game found between **{ht[1]}** and **{at[1]}**."))
+    await db.execute("DELETE FROM games WHERE id=?", (game[0],))
+    await db.commit()
+    e = discord.Embed(color=0xFF4444)
+    e.set_author(name="🗑️  Game Cancelled")
+    e.description = f"**{at[1]}** @ **{ht[1]}** has been removed from the schedule."
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
