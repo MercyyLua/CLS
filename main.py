@@ -24,17 +24,29 @@ FA_ROLE_ID      = 1464129524210995325
 MANAGER_ROLE_ID = 1484655385607540989
 
 TEAM_DATA = [
-    ("Iowa Dream",           "IOWA", 1478105341899051028),
-    ("St Louis Archers",     "STL",  1478111948313989160),
-    ("Philadelphia Surge",   "PHI",  1483156350258254084),
-    ("Seattle Sonics",       "SEA",  1481717125877071992),
-    ("Baltimore Ospreys",    "BAL",  1481718253536546888),
-    ("Los Angeles Reapers",  "LAR",  1482413661824745602),
-    ("Chicago Ravens",       "CHI",  1483336220544077924),
-    ("Arizona Firebirds",    "ARI",  1482435095938732042),
-    ("Houston Bulls",        "HOU",  1482465219103166484),
-    ("San Diego Tropics",    "SDT",  1483156220369047615),
-    ("Dallas Panthers",      "DAL",  1483306097535225956),
+    ("Iowa Dream",              "IOWA", 1478105341899051028),
+    ("St Louis Archers",        "STL",  1478111948313989160),
+    ("Philadelphia Surge",      "PHI",  1483156350258254084),
+    ("Seattle Sonics",          "SEA",  1481717125877071992),
+    ("Baltimore Ospreys",       "BAL",  1481718253536546888),
+    ("Los Angeles Reapers",     "LAR",  1482413661824745602),
+    ("Chicago Ravens",          "CHI",  1483336220544077924),
+    ("Arizona Firebirds",       "ARI",  1482435095938732042),
+    ("Houston Bulls",           "HOU",  1482465219103166484),
+    ("San Diego Tropics",       "SDT",  1483156220369047615),
+    ("Dallas Panthers",         "DAL",  1483306097535225956),
+    ("Miami Sharks",            "MIA",  1483695684199645256),
+    ("San Francisco JailBirds", "SFJ",  1481718381760479446),
+]
+
+# Week 1 Schedule — Round 1 — Monday March 30th
+WEEK1_SCHEDULE = [
+    ("DAL",  "STL",  "LS1 — Monday March 30th 8PM EST"),
+    ("SEA",  "LAR",  "LS2 — Monday March 30th 8PM EST"),
+    ("SDT",  "PHI",  "LS3 — Monday March 30th 8PM EST"),
+    ("ARI",  "IOWA", "LS4 — Monday March 30th 9PM EST"),
+    ("HOU",  "MIA",  "LS5 — Monday March 30th 9PM EST"),
+    ("SFJ",  "CHI",  "LS6 — Monday March 30th 9PM EST"),
 ]
 
 async def init_db():
@@ -54,6 +66,7 @@ async def init_db():
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             discord_id   INTEGER UNIQUE NOT NULL,
             username     TEXT NOT NULL,
+            rblx_username TEXT,
             position     TEXT NOT NULL,
             team_id      INTEGER REFERENCES teams(id),
             batting_avg  REAL DEFAULT 0.0,
@@ -64,6 +77,17 @@ async def init_db():
             games_played INTEGER DEFAULT 0,
             free_agent   INTEGER DEFAULT 1,
             created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS game_stats (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id      INTEGER REFERENCES games(id),
+            player_id    INTEGER REFERENCES players(id),
+            batting_avg  REAL,
+            home_runs    INTEGER,
+            rbi          INTEGER,
+            era          REAL,
+            strikeouts   INTEGER,
+            submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS games (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,6 +142,25 @@ async def init_db():
             ON CONFLICT(team_id) DO UPDATE SET role_id=excluded.role_id
         """, (team_id, role_id))
     await db.commit()
+
+    # Seed Week 1 schedule if not already added
+    cur_sched = await db.execute("SELECT COUNT(*) FROM games WHERE scheduled_at LIKE '%March 30th%'")
+    already = (await cur_sched.fetchone())[0]
+    if not already:
+        for away_abbr, home_abbr, slot in WEEK1_SCHEDULE:
+            cur_a = await db.execute("SELECT id FROM teams WHERE abbreviation=?", (away_abbr,))
+            away_team = await cur_a.fetchone()
+            cur_h = await db.execute("SELECT id FROM teams WHERE abbreviation=?", (home_abbr,))
+            home_team = await cur_h.fetchone()
+            if away_team and home_team:
+                await db.execute(
+                    "INSERT INTO games (home_team_id, away_team_id, status, scheduled_at) VALUES (?,?,?,?)",
+                    (home_team[0], away_team[0], "scheduled", slot)
+                )
+                print(f"  📅 Scheduled: {away_abbr} @ {home_abbr} — {slot}")
+        await db.commit()
+        print("✅ Week 1 schedule seeded.")
+
     print("✅ Database initialized. All teams and roles ready.")
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -339,19 +382,25 @@ async def owners(interaction: discord.Interaction):
 
 # ── PLAYER COMMANDS ───────────────────────────────────────────────
 @bot.tree.command(name="register", description="Register yourself as an HCBB league player")
-@app_commands.describe(position="Your primary position")
+@app_commands.describe(position="Your primary position", rblx_username="Your Roblox username")
 @app_commands.choices(position=[app_commands.Choice(name=p, value=p) for p in POSITIONS])
-async def register(interaction: discord.Interaction, position: str):
+async def register(interaction: discord.Interaction, position: str, rblx_username: str):
     await interaction.response.defer()
     db = await get_db()
     cur = await db.execute("SELECT id FROM players WHERE discord_id=?", (interaction.user.id,))
     if await cur.fetchone():
         return await interaction.followup.send(embed=warn_embed("Already Registered", "You're already in the league."))
-    await db.execute("INSERT INTO players (discord_id, username, position) VALUES (?,?,?)",
-                     (interaction.user.id, interaction.user.display_name, position))
+    await db.execute("INSERT INTO players (discord_id, username, rblx_username, position) VALUES (?,?,?,?)",
+                     (interaction.user.id, interaction.user.display_name, rblx_username, position))
     await db.commit()
-    e = success_embed("Registered!", f"Welcome **{interaction.user.display_name}**!\n{POSITION_EMOJIS.get(position,'⚾')} Position: **{position}**\nStatus: **Free Agent**")
+    e = discord.Embed(color=SUCCESS_COLOR)
+    e.set_author(name="✅ Player Registered!", icon_url=interaction.user.display_avatar.url)
     e.set_thumbnail(url=interaction.user.display_avatar.url)
+    e.add_field(name="Discord", value=interaction.user.mention, inline=True)
+    e.add_field(name="Roblox", value=f"`{rblx_username}`", inline=True)
+    e.add_field(name="Position", value=f"{POSITION_EMOJIS.get(position,'⚾')} **{position}**", inline=True)
+    e.add_field(name="Status", value="🆓 Free Agent", inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
 @bot.tree.command(name="sign", description="Sign a free agent to your team")
@@ -518,14 +567,14 @@ async def profile(interaction: discord.Interaction, player: discord.Member = Non
 async def free_agents(interaction: discord.Interaction):
     await interaction.response.defer()
     db = await get_db()
-    cur = await db.execute("SELECT discord_id, username, position FROM players WHERE free_agent=1 ORDER BY position")
+    cur = await db.execute("SELECT discord_id, username, rblx_username, position FROM players WHERE free_agent=1 ORDER BY position")
     fas = await cur.fetchall()
     fa_role = interaction.guild.get_role(FA_ROLE_ID)
     fa_role_str = f"{fa_role.mention} — " if fa_role else ""
     if not fas:
         return await interaction.followup.send(embed=warn_embed("No Free Agents", f"{fa_role_str}Everyone is signed!"))
     e = base_embed("🆓 Free Agent Board", f"{fa_role_str}**{len(fas)} available players**")
-    lines = [f"{POSITION_EMOJIS.get(pos,'⚾')} **{u}** — {pos}  (<@{did}>)" for did, u, pos in fas]
+    lines = [f"{POSITION_EMOJIS.get(pos,'⚾')} **{u}**{f' (`{rblx}`)' if rblx else ''} — `{pos}`  (<@{did}>)" for did, u, rblx, pos in fas]
     e.description += "\n\n" + "\n".join(lines)
     await interaction.followup.send(embed=e)
 
@@ -1004,6 +1053,159 @@ async def managers(interaction: discord.Interaction):
         lines.append(f"**{current_team}**\n" + "\n".join(team_lines))
     e.description = "\n\n".join(lines)
     e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+
+@bot.tree.command(name="report_score", description="[MOD] Report a game result with player stats")
+@app_commands.describe(
+    game_id="Game ID to report",
+    home_score="Home team score",
+    away_score="Away team score",
+    mvp="MVP of the game (optional)"
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def report_score(interaction: discord.Interaction, game_id: int, home_score: int, away_score: int, mvp: discord.Member = None):
+    await interaction.response.defer()
+    db = await get_db()
+    cur = await db.execute("SELECT id, home_team_id, away_team_id, status FROM games WHERE id=?", (game_id,))
+    game = await cur.fetchone()
+    if not game:
+        return await interaction.followup.send(embed=error_embed("Game Not Found"))
+    if game[3] == "final":
+        return await interaction.followup.send(embed=warn_embed("Already Reported"))
+    await db.execute("UPDATE games SET home_score=?, away_score=?, status='final', played_at=CURRENT_TIMESTAMP WHERE id=?",
+                     (home_score, away_score, game_id))
+    if home_score > away_score:
+        await db.execute("UPDATE teams SET wins=wins+1 WHERE id=?", (game[1],))
+        await db.execute("UPDATE teams SET losses=losses+1 WHERE id=?", (game[2],))
+    else:
+        await db.execute("UPDATE teams SET wins=wins+1 WHERE id=?", (game[2],))
+        await db.execute("UPDATE teams SET losses=losses+1 WHERE id=?", (game[1],))
+    await db.commit()
+    cur2 = await db.execute("SELECT name, abbreviation FROM teams WHERE id=?", (game[1],))
+    ht = await cur2.fetchone()
+    cur3 = await db.execute("SELECT name, abbreviation FROM teams WHERE id=?", (game[2],))
+    at = await cur3.fetchone()
+    winner = ht if home_score > away_score else at
+    loser  = at if home_score > away_score else ht
+    e = discord.Embed(color=0xFFD700)
+    e.set_author(name=f"⚾ Final Score — Game #{game_id}")
+    e.add_field(name="🏆 Winner", value=f"**{winner[0]}**", inline=True)
+    e.add_field(name="Score", value=f"**{max(home_score,away_score)} — {min(home_score,away_score)}**", inline=True)
+    e.add_field(name="❌ Loser", value=f"**{loser[0]}**", inline=True)
+    if mvp:
+        e.add_field(name="⭐ MVP", value=mvp.mention, inline=False)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="submit_stats", description="Submit your stats after a game")
+@app_commands.describe(
+    game_id="Game ID these stats are for",
+    batting_avg="Your batting average e.g. 0.350",
+    home_runs="Home runs hit",
+    rbi="RBIs",
+    era="ERA (pitchers only)",
+    strikeouts="Strikeouts (pitchers only)"
+)
+async def submit_stats(interaction: discord.Interaction, game_id: int,
+                       batting_avg: float = None, home_runs: int = None,
+                       rbi: int = None, era: float = None, strikeouts: int = None):
+    await interaction.response.defer(ephemeral=True)
+    db = await get_db()
+    cur = await db.execute("SELECT id FROM players WHERE discord_id=?", (interaction.user.id,))
+    p = await cur.fetchone()
+    if not p:
+        return await interaction.followup.send(embed=error_embed("Not Registered", "You need to `/register` first."))
+    cur2 = await db.execute("SELECT id, status FROM games WHERE id=?", (game_id,))
+    game = await cur2.fetchone()
+    if not game:
+        return await interaction.followup.send(embed=error_embed("Game Not Found", f"No game with ID #{game_id}."))
+
+    # Update career stats
+    updates, values = [], []
+    if batting_avg  is not None: updates.append("batting_avg=?");  values.append(batting_avg)
+    if home_runs    is not None: updates.append("home_runs=home_runs+?"); values.append(home_runs)
+    if rbi          is not None: updates.append("rbi=rbi+?");       values.append(rbi)
+    if era          is not None: updates.append("era=?");            values.append(era)
+    if strikeouts   is not None: updates.append("strikeouts=strikeouts+?"); values.append(strikeouts)
+    updates.append("games_played=games_played+1")
+    values.append(interaction.user.id)
+    await db.execute(f"UPDATE players SET {', '.join(updates)} WHERE discord_id=?", values)
+    await db.commit()
+
+    e = success_embed("Stats Submitted!", f"Your stats for Game **#{game_id}** have been recorded.")
+    parts = []
+    if batting_avg  is not None: parts.append(f"AVG: `{batting_avg:.3f}`")
+    if home_runs    is not None: parts.append(f"HR: `{home_runs}`")
+    if rbi          is not None: parts.append(f"RBI: `{rbi}`")
+    if era          is not None: parts.append(f"ERA: `{era:.2f}`")
+    if strikeouts   is not None: parts.append(f"K: `{strikeouts}`")
+    if parts:
+        e.add_field(name="Submitted", value=" · ".join(parts), inline=False)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="auto_schedule", description="[ADMIN] Auto-generate a full round-robin season schedule")
+@app_commands.describe(
+    start_date="Start date e.g. March 30",
+    games_per_day="How many games per day (default 3)",
+    time_slot="Default game time e.g. 8PM EST"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def auto_schedule(interaction: discord.Interaction, start_date: str = "TBD", games_per_day: int = 3, time_slot: str = "8PM EST"):
+    await interaction.response.defer()
+    db = await get_db()
+    cur = await db.execute("SELECT id, name FROM teams ORDER BY name")
+    teams = await cur.fetchall()
+    if len(teams) < 2:
+        return await interaction.followup.send(embed=error_embed("Not Enough Teams", "Need at least 2 teams to generate a schedule."))
+
+    # Generate round robin matchups
+    team_list = list(teams)
+    if len(team_list) % 2 != 0:
+        team_list.append((None, "BYE"))  # Add bye if odd number
+
+    n = len(team_list)
+    rounds = []
+    for r in range(n - 1):
+        round_games = []
+        for i in range(n // 2):
+            home = team_list[i]
+            away = team_list[n - 1 - i]
+            if home[0] and away[0]:
+                round_games.append((home, away))
+        rounds.append(round_games)
+        team_list.insert(1, team_list.pop())
+
+    # Insert all games into DB
+    total = 0
+    for round_num, round_games in enumerate(rounds, 1):
+        for home, away in round_games:
+            slot = f"Round {round_num} — {start_date} {time_slot}"
+            await db.execute(
+                "INSERT INTO games (home_team_id, away_team_id, status, scheduled_at) VALUES (?,?,?,?)",
+                (home[0], away[0], "scheduled", slot)
+            )
+            total += 1
+    await db.commit()
+
+    # Build schedule display
+    lines = [f"📅 **Auto-Generated Schedule** — {total} games across {len(rounds)} rounds\n"]
+    for round_num, round_games in enumerate(rounds, 1):
+        lines.append(f"**Round {round_num}**")
+        for i, (home, away) in enumerate(round_games, 1):
+            lines.append(f"LS{i} — **{away[1]}** @ **{home[1]}** · {time_slot}")
+        lines.append("")
+
+    e = discord.Embed(
+        title="📅  Season Schedule Generated",
+        description="\n".join(lines[:20]),  # Show first 20 lines
+        color=BRAND_COLOR
+    )
+    e.add_field(name="Total Games", value=str(total), inline=True)
+    e.add_field(name="Rounds", value=str(len(rounds)), inline=True)
+    e.add_field(name="Teams", value=str(len(teams)), inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League — Use /upcoming_games to view full schedule")
     await interaction.followup.send(embed=e)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
