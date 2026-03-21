@@ -19,9 +19,11 @@ async def get_db() -> aiosqlite.Connection:
     return _db
 
 # ── Pre-configured teams and roles ───────────────────────────────
-GUILD_ID        = 1464096719867347096
-FA_ROLE_ID      = 1464129524210995325
-MANAGER_ROLE_ID = 1484655385607540989
+GUILD_ID           = 1464096719867347096
+FA_ROLE_ID         = 1464129524210995325
+MANAGER_ROLE_ID    = 1484655385607540989
+SUSPENSION_ROLE_ID = 1484723857339453471
+SUSPENSION_CHANNEL = 1478093960621723730
 
 TEAM_DATA = [
     ("Iowa Dream",              "IOWA", 1478105341899051028),
@@ -120,6 +122,15 @@ async def init_db():
             team_id    INTEGER REFERENCES teams(id),
             discord_id INTEGER NOT NULL,
             PRIMARY KEY (team_id, discord_id)
+        );
+        CREATE TABLE IF NOT EXISTS suspensions (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id INTEGER NOT NULL,
+            reason     TEXT NOT NULL,
+            games      INTEGER DEFAULT 0,
+            issued_by  INTEGER NOT NULL,
+            active     INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
     await db.commit()
@@ -1207,6 +1218,194 @@ async def auto_schedule(interaction: discord.Interaction, start_date: str = "TBD
     e.add_field(name="Teams", value=str(len(teams)), inline=True)
     e.set_footer(text="⚾ HCBB 9v9 2.0 League — Use /upcoming_games to view full schedule")
     await interaction.followup.send(embed=e)
+
+
+@bot.tree.command(name="suspend", description="[ADMIN] Suspend a player")
+@app_commands.describe(
+    player="Player to suspend",
+    reason="Reason for suspension",
+    games="Number of games suspended (0 = indefinite)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def suspend(interaction: discord.Interaction, player: discord.Member, reason: str, games: int = 0):
+    await interaction.response.defer()
+    db = await get_db()
+
+    # Check if already suspended
+    cur = await db.execute("SELECT id FROM suspensions WHERE discord_id=? AND active=1", (player.id,))
+    if await cur.fetchone():
+        return await interaction.followup.send(embed=error_embed("Already Suspended", f"{player.mention} is already suspended."))
+
+    # Give suspension role
+    susp_role = interaction.guild.get_role(SUSPENSION_ROLE_ID)
+    if susp_role:
+        try:
+            await player.add_roles(susp_role, reason=f"HCBB Suspension: {reason}")
+        except discord.Forbidden:
+            pass
+
+    # Log to DB
+    await db.execute(
+        "INSERT INTO suspensions (discord_id, reason, games, issued_by) VALUES (?,?,?,?)",
+        (player.id, reason, games, interaction.user.id)
+    )
+    await db.commit()
+
+    games_str = f"**{games} game(s)**" if games > 0 else "**Indefinite**"
+
+    # Post to suspension channel
+    susp_channel = interaction.guild.get_channel(SUSPENSION_CHANNEL)
+    if susp_channel:
+        announcement = discord.Embed(color=0xFF0000)
+        announcement.set_author(name="🚨  League Suspension", icon_url=player.display_avatar.url)
+        announcement.set_thumbnail(url=player.display_avatar.url)
+        announcement.description = f"{player.mention} has been suspended from league play."
+        announcement.add_field(name="👤 Player", value=f"{player.mention} `{player.display_name}`", inline=True)
+        announcement.add_field(name="⏳ Length", value=games_str, inline=True)
+        announcement.add_field(name="📋 Reason", value=f">>> {reason}", inline=False)
+        announcement.add_field(name="🔨 Issued By", value=interaction.user.mention, inline=True)
+        announcement.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        await susp_channel.send(embed=announcement)
+
+    # Reply to command
+    e = discord.Embed(color=0xFF0000)
+    e.set_author(name="🚨  Player Suspended", icon_url=player.display_avatar.url)
+    e.set_thumbnail(url=player.display_avatar.url)
+    e.description = f"**{player.display_name}** has been suspended."
+    e.add_field(name="👤 Player", value=player.mention, inline=True)
+    e.add_field(name="⏳ Length", value=games_str, inline=True)
+    e.add_field(name="📋 Reason", value=f">>> {reason}", inline=False)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="unsuspend", description="[ADMIN] Lift a player's suspension")
+@app_commands.describe(player="Player to unsuspend")
+@app_commands.checks.has_permissions(administrator=True)
+async def unsuspend(interaction: discord.Interaction, player: discord.Member):
+    await interaction.response.defer()
+    db = await get_db()
+    cur = await db.execute("SELECT id FROM suspensions WHERE discord_id=? AND active=1", (player.id,))
+    if not await cur.fetchone():
+        return await interaction.followup.send(embed=error_embed("Not Suspended", f"{player.mention} isn't currently suspended."))
+
+    await db.execute("UPDATE suspensions SET active=0 WHERE discord_id=? AND active=1", (player.id,))
+    await db.commit()
+
+    # Remove suspension role
+    susp_role = interaction.guild.get_role(SUSPENSION_ROLE_ID)
+    if susp_role and susp_role in player.roles:
+        try:
+            await player.remove_roles(susp_role, reason="HCBB: Suspension lifted")
+        except discord.Forbidden:
+            pass
+
+    # Announce in suspension channel
+    susp_channel = interaction.guild.get_channel(SUSPENSION_CHANNEL)
+    if susp_channel:
+        announcement = discord.Embed(color=0x2ECC71)
+        announcement.set_author(name="✅  Suspension Lifted", icon_url=player.display_avatar.url)
+        announcement.description = f"{player.mention}'s suspension has been lifted. They are eligible to play."
+        announcement.add_field(name="🔓 Reinstated By", value=interaction.user.mention, inline=True)
+        announcement.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        await susp_channel.send(embed=announcement)
+
+    e = discord.Embed(color=0x2ECC71)
+    e.set_author(name="✅  Suspension Lifted", icon_url=player.display_avatar.url)
+    e.description = f"**{player.display_name}**'s suspension has been lifted."
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="suspensions", description="View all active suspensions")
+async def suspensions(interaction: discord.Interaction):
+    await interaction.response.defer()
+    db = await get_db()
+    cur = await db.execute("""
+        SELECT discord_id, reason, games, issued_by, created_at
+        FROM suspensions WHERE active=1 ORDER BY created_at DESC
+    """)
+    rows = await cur.fetchall()
+    if not rows:
+        return await interaction.followup.send(embed=success_embed("No Active Suspensions", "All players are eligible to play."))
+    e = discord.Embed(title="🚨  Active Suspensions", color=0xFF0000)
+    lines = []
+    for discord_id, reason, games, issued_by, ts in rows:
+        length = f"{games} game(s)" if games > 0 else "Indefinite"
+        date = ts[:10] if ts else "?"
+        lines.append(f"<@{discord_id}> · **{length}** · `{date}`\n> {reason}")
+    e.description = "\n\n".join(lines)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="force_sign", description="[ADMIN] Force sign a player to a team")
+@app_commands.describe(player="Player to sign", team="Team to sign them to")
+@app_commands.checks.has_permissions(administrator=True)
+async def force_sign(interaction: discord.Interaction, player: discord.Member, team: discord.Role):
+    await interaction.response.defer()
+    config = await get_config(interaction.guild.id)
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Team Not Found", f"{team.mention} isn't linked to a team."))
+    db = await get_db()
+
+    # Roster cap check
+    cur_count = await db.execute("SELECT COUNT(*) FROM players WHERE team_id=?", (row[0],))
+    count = (await cur_count.fetchone())[0]
+    if count >= 20:
+        return await interaction.followup.send(embed=error_embed("Roster Full", f"**{row[1]}** is at **20/20** players."))
+
+    # Auto-register if not in DB
+    cur2 = await db.execute("SELECT id, free_agent, team_id FROM players WHERE discord_id=?", (player.id,))
+    p = await cur2.fetchone()
+    if not p:
+        await db.execute("INSERT INTO players (discord_id, username, position) VALUES (?,?,?)",
+                         (player.id, player.display_name, "N/A"))
+        await db.commit()
+        cur2 = await db.execute("SELECT id, free_agent, team_id FROM players WHERE discord_id=?", (player.id,))
+        p = await cur2.fetchone()
+
+    # Release from current team if on one
+    if p[2]:
+        cur_old = await db.execute("SELECT id FROM team_roles WHERE team_id=?", (p[2],))
+        old_role_row = await cur_old.fetchone()
+        if old_role_row:
+            old_role = interaction.guild.get_role(old_role_row[0])
+            if old_role and old_role in player.roles:
+                try:
+                    await player.remove_roles(old_role, reason="HCBB: Force signed to new team")
+                except discord.Forbidden:
+                    pass
+
+    await db.execute("UPDATE players SET team_id=?, free_agent=0 WHERE discord_id=?", (row[0], player.id))
+    await db.execute("INSERT INTO transactions (player_id, to_team, type) VALUES (?,?,?)", (p[0], row[0], "SIGN"))
+    await db.commit()
+
+    await add_team_role(player, interaction.guild, row[0])
+    fa_role = interaction.guild.get_role(FA_ROLE_ID)
+    if fa_role and fa_role in player.roles:
+        try:
+            await player.remove_roles(fa_role, reason="HCBB: Force signed")
+        except discord.Forbidden:
+            pass
+
+    e = discord.Embed(color=0xE74C3C)
+    e.set_author(name="⚡  Force Signed", icon_url=player.display_avatar.url)
+    e.set_thumbnail(url=player.display_avatar.url)
+    e.description = f"**{player.display_name}** has been force signed to {team.mention}"
+    e.add_field(name="👤 Player", value=player.mention, inline=True)
+    e.add_field(name="🏟️ Team", value=team.mention, inline=True)
+    e.add_field(name="📋 Roster", value=f"`{count+1}/20`", inline=True)
+    e.add_field(name="🔨 Signed By", value=interaction.user.mention, inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+    tx = discord.Embed(color=0xE74C3C)
+    tx.set_author(name="⚡  Transaction Wire — FORCE SIGNED", icon_url=player.display_avatar.url)
+    tx.set_thumbnail(url=player.display_avatar.url)
+    tx.description = f"**{player.display_name}** force signed to {team.mention}"
+    tx.add_field(name="👤 Player", value=player.mention, inline=True)
+    tx.add_field(name="🏟️ Team", value=team.mention, inline=True)
+    tx.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await post_transaction(interaction.guild, config, tx)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
