@@ -41,6 +41,23 @@ TEAM_DATA = [
     ("San Francisco JailBirds", "SFJ",  1481718381760479446),
 ]
 
+# Team emoji map
+TEAM_EMOJIS = {
+    "DAL":  "<:panthers:1483185226174697555>",
+    "STL":  "<:StLouisArchers:1478098322244768066>",
+    "SEA":  "<:SeattleSonics:1478098221560762468>",
+    "LAR":  "<:reapers:1482244326699565058>",
+    "SDT":  "<:SanDiegoTropics:1478097958921830522>",
+    "PHI":  "<:Philadelphia:1478098432273944787>",
+    "ARI":  "<:ArizonaFirebirds:1478097743128956998>",
+    "IOWA": "<:IowaDream:1478098067818545244>",
+    "HOU":  "<:HoustonBulls:1478100936692994089>",
+    "MIA":  "<:MiamiSharks:1478099812875243686>",
+    "SFJ":  "<:SanFranciscoJailBirds:1478099356048429099>",
+    "CHI":  "<:ChicagoRavens:1478100433456336938>",
+    "BAL":  "<:BaltimoreOspreys:1478100228480696473>",
+}
+
 # Week 1 Schedule — Round 1 — Monday March 30th
 WEEK1_SCHEDULE = [
     ("DAL",  "STL",  "LS1 — Monday March 30th 8PM EST"),
@@ -659,14 +676,13 @@ async def schedule_game(interaction: discord.Interaction, home: discord.Role, aw
         e.add_field(name="📅 Date/Time", value=date)
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="report_game", description="[MOD] Report a game result by selecting teams")
+@bot.tree.command(name="report_game", description="Report a game result — owners and managers can use this")
 @app_commands.describe(
     home_team="Home team",
     away_team="Away team",
     home_score="Home team score",
     away_score="Away team score"
 )
-@app_commands.checks.has_permissions(manage_guild=True)
 async def report_game(interaction: discord.Interaction, home_team: discord.Role, away_team: discord.Role, home_score: int, away_score: int):
     await interaction.response.defer()
     ht = await get_team_by_role(home_team)
@@ -674,6 +690,17 @@ async def report_game(interaction: discord.Interaction, home_team: discord.Role,
     if not ht or not at:
         return await interaction.followup.send(embed=error_embed("Team Not Found", "One or both roles aren't linked to a team."))
     db = await get_db()
+
+    # Check user is owner or manager of one of the two teams, or is admin
+    is_admin = interaction.user.guild_permissions.administrator
+    is_ht_owner = ht[3] == interaction.user.id
+    is_at_owner = at[3] == interaction.user.id
+    cur_mgr_ht = await db.execute("SELECT 1 FROM team_managers WHERE team_id=? AND discord_id=?", (ht[0], interaction.user.id))
+    cur_mgr_at = await db.execute("SELECT 1 FROM team_managers WHERE team_id=? AND discord_id=?", (at[0], interaction.user.id))
+    is_ht_mgr = await cur_mgr_ht.fetchone() is not None
+    is_at_mgr = await cur_mgr_at.fetchone() is not None
+    if not any([is_admin, is_ht_owner, is_at_owner, is_ht_mgr, is_at_mgr]):
+        return await interaction.followup.send(embed=error_embed("Not Authorized", "You must be the owner or manager of one of these teams to report the result."), ephemeral=True)
     # Find the scheduled game between these two teams
     cur = await db.execute("""
         SELECT id FROM games
@@ -1223,68 +1250,82 @@ async def submit_stats(interaction: discord.Interaction, game_id: int,
     e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="auto_schedule", description="[ADMIN] Auto-generate a full round-robin season schedule")
+@bot.tree.command(name="auto_schedule", description="[ADMIN] Generate and post ONE round of the schedule")
 @app_commands.describe(
-    start_date="Start date e.g. March 30",
-    games_per_day="How many games per day (default 3)",
-    time_slot="Default game time e.g. 8PM EST"
+    round_num="Round number e.g. 1",
+    date="Date e.g. Monday March 30th",
+    time_slot_1="Time for first half of games e.g. 8PM EST",
+    time_slot_2="Time for second half of games e.g. 9PM EST"
 )
 @app_commands.checks.has_permissions(administrator=True)
-async def auto_schedule(interaction: discord.Interaction, start_date: str = "TBD", games_per_day: int = 3, time_slot: str = "8PM EST"):
+async def auto_schedule(interaction: discord.Interaction, round_num: int, date: str, time_slot_1: str = "8PM EST", time_slot_2: str = "9PM EST"):
     await interaction.response.defer()
     db = await get_db()
-    cur = await db.execute("SELECT id, name FROM teams ORDER BY name")
+    cur = await db.execute("SELECT id, name, abbreviation FROM teams ORDER BY name")
     teams = await cur.fetchall()
     if len(teams) < 2:
-        return await interaction.followup.send(embed=error_embed("Not Enough Teams", "Need at least 2 teams to generate a schedule."))
+        return await interaction.followup.send(embed=error_embed("Not Enough Teams", "Need at least 2 teams."))
 
-    # Generate round robin matchups
     team_list = list(teams)
     if len(team_list) % 2 != 0:
-        team_list.append((None, "BYE"))  # Add bye if odd number
+        team_list.append((None, "BYE", "BYE"))
 
+    # Rotate to get the right round
     n = len(team_list)
-    rounds = []
-    for r in range(n - 1):
-        round_games = []
-        for i in range(n // 2):
-            home = team_list[i]
-            away = team_list[n - 1 - i]
-            if home[0] and away[0]:
-                round_games.append((home, away))
-        rounds.append(round_games)
-        team_list.insert(1, team_list.pop())
+    fixed = team_list[0]
+    rotating = team_list[1:]
+    for _ in range(round_num - 1):
+        rotating = [rotating[-1]] + rotating[:-1]
+    rotated = [fixed] + rotating
 
-    # Insert all games into DB
-    total = 0
-    for round_num, round_games in enumerate(rounds, 1):
-        for home, away in round_games:
-            slot = f"Round {round_num} — {start_date} {time_slot}"
-            await db.execute(
-                "INSERT INTO games (home_team_id, away_team_id, status, scheduled_at) VALUES (?,?,?,?)",
-                (home[0], away[0], "scheduled", slot)
-            )
-            total += 1
+    # Generate matchups for this round
+    round_games = []
+    for i in range(n // 2):
+        home = rotated[i]
+        away = rotated[n - 1 - i]
+        if home[0] and away[0]:
+            round_games.append((away, home))  # (away, home)
+
+    # Split into two time slots
+    half = len(round_games) // 2
+    slot1_games = round_games[:half] if half > 0 else round_games
+    slot2_games = round_games[half:] if half > 0 else []
+
+    # Insert into DB
+    ls_num = 1
+    for away, home in round_games:
+        slot = f"Round {round_num} — {date} {time_slot_1}" if (ls_num <= len(slot1_games)) else f"Round {round_num} — {date} {time_slot_2}"
+        await db.execute(
+            "INSERT INTO games (home_team_id, away_team_id, status, scheduled_at) VALUES (?,?,?,?)",
+            (home[0], away[0], "scheduled", slot)
+        )
+        ls_num += 1
     await db.commit()
 
-    # Build schedule display
-    lines = [f"📅 **Auto-Generated Schedule** — {total} games across {len(rounds)} rounds\n"]
-    for round_num, round_games in enumerate(rounds, 1):
-        lines.append(f"**Round {round_num}**")
-        for i, (home, away) in enumerate(round_games, 1):
-            lines.append(f"LS{i} — **{away[1]}** @ **{home[1]}** · {time_slot}")
+    # Build plain text message
+    lines = [f"@here", f"**ROUND {round_num}**", f"**{date}**", ""]
+
+    if slot1_games:
+        lines.append(f"**{time_slot_1}**")
+        for i, (away, home) in enumerate(slot1_games, 1):
+            away_emoji = TEAM_EMOJIS.get(away[2], "⚾")
+            home_emoji = TEAM_EMOJIS.get(home[2], "⚾")
+            lines.append(f"{away_emoji} at {home_emoji} LS{i}")
         lines.append("")
 
-    e = discord.Embed(
-        title="📅  Season Schedule Generated",
-        description="\n".join(lines[:20]),  # Show first 20 lines
-        color=BRAND_COLOR
-    )
-    e.add_field(name="Total Games", value=str(total), inline=True)
-    e.add_field(name="Rounds", value=str(len(rounds)), inline=True)
-    e.add_field(name="Teams", value=str(len(teams)), inline=True)
-    e.set_footer(text="⚾ HCBB 9v9 2.0 League — Use /upcoming_games to view full schedule")
-    await interaction.followup.send(embed=e)
+    if slot2_games:
+        lines.append(f"**{time_slot_2}**")
+        for i, (away, home) in enumerate(slot2_games, len(slot1_games) + 1):
+            away_emoji = TEAM_EMOJIS.get(away[2], "⚾")
+            home_emoji = TEAM_EMOJIS.get(home[2], "⚾")
+            lines.append(f"{away_emoji} at {home_emoji} LS{i}")
+        lines.append("")
+
+    lines.append("**NOTES**")
+    lines.append("# *PMs can reschedule if a mutual agreement is reached if not the original time will be played*")
+    lines.append("# *one person from each game must screenshot all stats and the score of each game in my DMs*")
+
+    await interaction.followup.send("\n".join(lines))
 
 
 @bot.tree.command(name="suspend", description="[ADMIN] Suspend a player")
