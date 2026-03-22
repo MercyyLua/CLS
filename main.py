@@ -776,21 +776,29 @@ async def upcoming_games(interaction: discord.Interaction):
     await interaction.response.defer()
     db = await get_db()
     cur = await db.execute("""
-        SELECT g.id, ht.name, at.name, g.scheduled_at
+        SELECT ht.name, ht.abbreviation, at.name, at.abbreviation, g.scheduled_at
         FROM games g
         JOIN teams ht ON ht.id = g.home_team_id
         JOIN teams at ON at.id = g.away_team_id
-        WHERE g.status = 'scheduled' ORDER BY g.id ASC LIMIT 15
+        WHERE g.status = 'scheduled' ORDER BY g.id ASC LIMIT 12
     """)
     rows = await cur.fetchall()
     if not rows:
         return await interaction.followup.send(embed=warn_embed("No Upcoming Games", "The schedule is empty."))
 
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for hname, habbr, aname, aabbr, sched in rows:
+        slot = sched or "TBD"
+        away_emoji = TEAM_EMOJIS.get(aabbr, "⚾")
+        home_emoji = TEAM_EMOJIS.get(habbr, "⚾")
+        grouped[slot].append(f"{away_emoji} **{aname}**  `@`  {home_emoji} **{hname}**")
+
     e = discord.Embed(title="📅  Upcoming Games", color=BRAND_COLOR)
-    for gid, hname, aname, sched in rows:
+    for slot, games in grouped.items():
         e.add_field(
-            name=f"**{aname}**  `@`  **{hname}**",
-            value=f"📍 {sched or 'TBD'}",
+            name=f"🗓️  {slot}",
+            value="\n".join(games),
             inline=False
         )
     e.set_footer(text=f"⚾ HCBB 9v9 2.0 League  ·  {len(rows)} game(s) scheduled")
@@ -1254,11 +1262,10 @@ async def submit_stats(interaction: discord.Interaction, game_id: int,
 @app_commands.describe(
     round_num="Round number e.g. 1",
     date="Date e.g. Monday March 30th",
-    time_slot_1="Time for first half of games e.g. 8PM EST",
-    time_slot_2="Time for second half of games e.g. 9PM EST"
+    time_slot_1="Game time e.g. 8PM EST"
 )
 @app_commands.checks.has_permissions(administrator=True)
-async def auto_schedule(interaction: discord.Interaction, round_num: int, date: str, time_slot_1: str = "8PM EST", time_slot_2: str = "9PM EST"):
+async def auto_schedule(interaction: discord.Interaction, round_num: int, date: str, time_slot_1: str = "8PM EST"):
     await interaction.response.defer()
     db = await get_db()
     cur = await db.execute("SELECT id, name, abbreviation FROM teams ORDER BY name")
@@ -1286,40 +1293,22 @@ async def auto_schedule(interaction: discord.Interaction, round_num: int, date: 
         if home[0] and away[0]:
             round_games.append((away, home))  # (away, home)
 
-    # Split into two time slots
-    half = len(round_games) // 2
-    slot1_games = round_games[:half] if half > 0 else round_games
-    slot2_games = round_games[half:] if half > 0 else []
-
-    # Insert into DB
-    ls_num = 1
+    # Insert all games into DB under one time slot
     for away, home in round_games:
-        slot = f"Round {round_num} — {date} {time_slot_1}" if (ls_num <= len(slot1_games)) else f"Round {round_num} — {date} {time_slot_2}"
+        slot = f"Round {round_num} — {date} {time_slot_1}"
         await db.execute(
             "INSERT INTO games (home_team_id, away_team_id, status, scheduled_at) VALUES (?,?,?,?)",
             (home[0], away[0], "scheduled", slot)
         )
-        ls_num += 1
     await db.commit()
 
     # Build plain text message
-    lines = [f"@here", f"**ROUND {round_num}**", f"**{date}**", ""]
-
-    if slot1_games:
-        lines.append(f"**{time_slot_1}**")
-        for i, (away, home) in enumerate(slot1_games, 1):
-            away_emoji = TEAM_EMOJIS.get(away[2], "⚾")
-            home_emoji = TEAM_EMOJIS.get(home[2], "⚾")
-            lines.append(f"{away_emoji} at {home_emoji} LS{i}")
-        lines.append("")
-
-    if slot2_games:
-        lines.append(f"**{time_slot_2}**")
-        for i, (away, home) in enumerate(slot2_games, len(slot1_games) + 1):
-            away_emoji = TEAM_EMOJIS.get(away[2], "⚾")
-            home_emoji = TEAM_EMOJIS.get(home[2], "⚾")
-            lines.append(f"{away_emoji} at {home_emoji} LS{i}")
-        lines.append("")
+    lines = [f"@here", f"**ROUND {round_num}**", f"**{date}**", "", f"**{time_slot_1}**"]
+    for i, (away, home) in enumerate(round_games, 1):
+        away_emoji = TEAM_EMOJIS.get(away[2], "⚾")
+        home_emoji = TEAM_EMOJIS.get(home[2], "⚾")
+        lines.append(f"{away_emoji} at {home_emoji} LS{i}")
+    lines.append("")
 
     lines.append("**NOTES**")
     lines.append("# *PMs can reschedule if a mutual agreement is reached if not the original time will be played*")
