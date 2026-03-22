@@ -1503,81 +1503,50 @@ async def cancel_game(interaction: discord.Interaction, home_team: discord.Role,
     await interaction.followup.send(embed=e)
 
 
-@bot.tree.command(name="gametime", description="[ADMIN] Post the game schedule announcement")
+@bot.tree.command(name="gametime", description="[ADMIN] Post upcoming schedule as a game day announcement")
 @app_commands.describe(
     week="Week number e.g. Week 1",
     round_num="Round number e.g. Round 1",
     date="Date e.g. Monday March 30th",
-    games="Games in format: away@home time slot | away@home time slot (use team abbreviations)"
+    limit="How many upcoming games to include (default 6)"
 )
 @app_commands.checks.has_permissions(manage_guild=True)
-async def gametime(interaction: discord.Interaction, week: str, round_num: str, date: str, games: str):
+async def gametime(interaction: discord.Interaction, week: str, round_num: str, date: str, limit: int = 6):
     await interaction.response.defer()
-
-    # Parse games: "DAL@STL 8PM LS1 | SEA@LAR 8PM LS2"
-    game_list = [g.strip() for g in games.split("|") if g.strip()]
-
-    eight_pm = []
-    nine_pm = []
-    other = []
-
     db = await get_db()
-    for game_str in game_list:
-        parts = game_str.split()
-        if not parts:
-            continue
-        matchup = parts[0]  # e.g. DAL@STL
-        slot = " ".join(parts[1:]) if len(parts) > 1 else ""
-        if "@" not in matchup:
-            continue
-        away_abbr, home_abbr = matchup.upper().split("@", 1)
 
-        cur_a = await db.execute("SELECT id, name FROM teams WHERE abbreviation=?", (away_abbr,))
-        away_t = await cur_a.fetchone()
-        cur_h = await db.execute("SELECT id, name FROM teams WHERE abbreviation=?", (home_abbr,))
-        home_t = await cur_h.fetchone()
+    cur = await db.execute("""
+        SELECT g.id, ht.name, at.name, g.scheduled_at
+        FROM games g
+        JOIN teams ht ON ht.id = g.home_team_id
+        JOIN teams at ON at.id = g.away_team_id
+        WHERE g.status = 'scheduled'
+        ORDER BY g.id ASC
+        LIMIT ?
+    """, (limit,))
+    rows = await cur.fetchall()
 
-        away_name = away_t[1] if away_t else away_abbr
-        home_name = home_t[1] if home_t else home_abbr
+    if not rows:
+        return await interaction.followup.send(embed=error_embed("No Upcoming Games", "Schedule is empty. Add games first with `/schedule_game`."))
 
-        entry = (away_name, home_name, slot)
-        if "9PM" in slot.upper() or "9:00" in slot:
-            nine_pm.append(entry)
-        elif "8PM" in slot.upper() or "8:00" in slot:
-            eight_pm.append(entry)
-        else:
-            other.append(entry)
+    # Group by time slot
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for gid, hname, aname, sched in rows:
+        slot = sched or "TBD"
+        grouped[slot].append((aname, hname, gid))
 
-    # Build the embed
     e = discord.Embed(color=0x1E90FF)
     e.title = f"⚾  {week}  ·  {round_num}"
     e.description = f"📅  **{date}**"
-    e.set_image(url="https://i.imgur.com/HxMiMaC.png")  # optional banner
 
-    def build_game_lines(game_entries):
+    for slot, games in grouped.items():
         lines = []
-        for i, (away, home, slot) in enumerate(game_entries, 1):
-            lines.append(f"**{away}** `@` **{home}**  ·  `{slot}`")
-        return "\n".join(lines) if lines else "_No games_"
-
-    if eight_pm:
+        for i, (away, home, gid) in enumerate(games, 1):
+            lines.append(f"**{away}**  `@`  **{home}**")
         e.add_field(
-            name="🕗  8:00 PM EST",
-            value=build_game_lines(eight_pm),
-            inline=False
-        )
-
-    if nine_pm:
-        e.add_field(
-            name="🕘  9:00 PM EST",
-            value=build_game_lines(nine_pm),
-            inline=False
-        )
-
-    if other:
-        e.add_field(
-            name="🕐  Other Times",
-            value=build_game_lines(other),
+            name=f"🕗  {slot}",
+            value="\n\n".join(lines),
             inline=False
         )
 
@@ -1589,8 +1558,7 @@ async def gametime(interaction: discord.Interaction, week: str, round_num: str, 
         ),
         inline=False
     )
-    e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Good luck to all teams!")
-
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Good luck to all teams! 🍀")
     await interaction.followup.send(content="||@everyone||", embed=e)
 
 @bot.tree.command(name="submit_player_stats", description="[MOD] Submit stats for multiple players at once after a game")
