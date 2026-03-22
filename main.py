@@ -325,16 +325,35 @@ async def standings(interaction: discord.Interaction):
     rows = await cur.fetchall()
     if not rows:
         return await interaction.followup.send(embed=warn_embed("No Teams Yet"))
-    medals = ["🥇","🥈","🥉"] + [f"`{i}.`" for i in range(4, 20)]
-    lines = []
+
+    medals = ["🥇","🥈","🥉"] + [f"{i}." for i in range(4, 20)]
+
+    # Header
+    header = "```"
+    header += f"{'#':<3} {'TEAM':<26} {'W':>3} {'L':>3} {'PCT':>6} {'GB':>5}\n"
+    header += "─" * 45 + "\n"
+
+    first_w = rows[0][2]
+    first_l = rows[0][3]
+
+    body_lines = []
     for i, (name, abbr, w, l) in enumerate(rows, 1):
         total = w + l
         pct = (w / total) if total else 0.0
-        gb = ((rows[0][2] - rows[0][3]) - (w - l)) / 2 if i > 1 else "-"
-        gb_str = f"GB: {gb:.1f}" if isinstance(gb, float) else "GB: —"
-        lines.append(f"{medals[i-1]} **{name}** — `{w}W {l}L` · PCT: `{pct:.3f}` · {gb_str}")
-    e = discord.Embed(title="🏆  League Standings", description="\n".join(lines), color=0xFFD700)
-    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        if i == 1:
+            gb_str = "  —"
+        else:
+            gb = ((first_w - first_l) - (w - l)) / 2
+            gb_str = f"{gb:>4.1f}" if gb > 0 else "  —"
+        medal = medals[i - 1]
+        body_lines.append(f"{medal:<3} {name:<26} {w:>3} {l:>3} {pct:>6.3f} {gb_str:>5}")
+
+    table = header + "\n".join(body_lines) + "```"
+
+    e = discord.Embed(color=0xFFD700)
+    e.set_author(name="🏆  CLS League — Standings")
+    e.description = table
+    e.set_footer(text=f"⚾ HCBB 9v9 2.0 League  ·  {len(rows)} teams")
     await interaction.followup.send(embed=e)
 
 @bot.tree.command(name="team_delete", description="[ADMIN] Delete a team")
@@ -1503,63 +1522,45 @@ async def cancel_game(interaction: discord.Interaction, home_team: discord.Role,
     await interaction.followup.send(embed=e)
 
 
-@bot.tree.command(name="gametime", description="[ADMIN] Post upcoming schedule as a game day announcement")
-@app_commands.describe(
-    week="Week number e.g. Week 1",
-    round_num="Round number e.g. Round 1",
-    date="Date e.g. Monday March 30th",
-    limit="How many upcoming games to include (default 6)"
-)
+@bot.tree.command(name="gametime", description="[ADMIN] Post upcoming games as a plain schedule announcement")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def gametime(interaction: discord.Interaction, week: str, round_num: str, date: str, limit: int = 6):
+async def gametime(interaction: discord.Interaction):
     await interaction.response.defer()
     db = await get_db()
 
     cur = await db.execute("""
-        SELECT g.id, ht.name, at.name, g.scheduled_at
+        SELECT ht.name, at.name, g.scheduled_at
         FROM games g
         JOIN teams ht ON ht.id = g.home_team_id
         JOIN teams at ON at.id = g.away_team_id
         WHERE g.status = 'scheduled'
         ORDER BY g.id ASC
-        LIMIT ?
-    """, (limit,))
+        LIMIT 20
+    """)
     rows = await cur.fetchall()
 
     if not rows:
-        return await interaction.followup.send(embed=error_embed("No Upcoming Games", "Schedule is empty. Add games first with `/schedule_game`."))
+        return await interaction.followup.send(embed=error_embed("No Upcoming Games", "Schedule is empty."))
 
-    # Group by time slot
     from collections import defaultdict
     grouped = defaultdict(list)
-    for gid, hname, aname, sched in rows:
-        slot = sched or "TBD"
-        grouped[slot].append((aname, hname, gid))
+    for hname, aname, sched in rows:
+        slot = sched if sched else "TBD"
+        grouped[slot].append((aname, hname))
 
-    e = discord.Embed(color=0x1E90FF)
-    e.title = f"⚾  {week}  ·  {round_num}"
-    e.description = f"📅  **{date}**"
-
+    lines = ["||@everyone||", ""]
+    slot_num = 1
     for slot, games in grouped.items():
-        lines = []
-        for i, (away, home, gid) in enumerate(games, 1):
-            lines.append(f"**{away}**  `@`  **{home}**")
-        e.add_field(
-            name=f"🕗  {slot}",
-            value="\n\n".join(lines),
-            inline=False
-        )
+        lines.append(f"**{slot}**")
+        for i, (away, home) in enumerate(games, 1):
+            lines.append(f"LS{slot_num} — **{away}** @ **{home}**")
+            slot_num += 1
+        lines.append("")
 
-    e.add_field(
-        name="\u200b",
-        value=(
-            "📌  *PMs can reschedule with mutual agreement — original time stands otherwise*\n"
-            "📸  *One player per game must screenshot stats & score and DM the commissioner*"
-        ),
-        inline=False
-    )
-    e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Good luck to all teams! 🍀")
-    await interaction.followup.send(content="||@everyone||", embed=e)
+    lines.append("*📌 PMs can reschedule with mutual agreement — original time stands otherwise*")
+    lines.append("*📸 One player per game must screenshot stats & score and DM the commissioner*")
+
+    await interaction.followup.send("\n".join(lines))
 
 @bot.tree.command(name="submit_player_stats", description="[MOD] Submit stats for multiple players at once after a game")
 @app_commands.describe(
