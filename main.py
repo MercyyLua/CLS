@@ -1985,6 +1985,135 @@ async def player_awards(interaction: discord.Interaction, player: discord.Member
         e.description = "_No awards yet._"
     await interaction.followup.send(embed=e)
 
+
+# ── REACTION ROLES PANEL ─────────────────────────────────────────
+PING_ROLES = [
+    ("📖", "Bible Ping",        1485344909253673030),
+    ("📸", "Media Ping",        1485364229241569471),
+    ("🤝", "Partnership Ping",  1485364338872029328),
+    ("🏅", "Awards",            1485364545710198874),
+    ("📊", "Final Scores Ping", 1485364629956853861),
+    ("📰", "Server News Ping",  1485364702883352778),
+    ("🎮", "Games News Ping",   1485364814774800584),
+    ("⚾", "Game Day Ping",     1485364903333072966),
+]
+
+class PingRoleView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        for emoji, label, role_id in PING_ROLES:
+            self.add_item(PingRoleButton(emoji=emoji, label=label, role_id=role_id))
+
+class PingRoleButton(discord.ui.Button):
+    def __init__(self, emoji: str, label: str, role_id: int):
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            label=label,
+            emoji=emoji,
+            custom_id=f"pingrole_{role_id}"
+        )
+        self.role_id = role_id
+
+    async def callback(self, interaction: discord.Interaction):
+        role = interaction.guild.get_role(self.role_id)
+        if not role:
+            return await interaction.response.send_message(
+                embed=error_embed("Role Not Found", "This role doesn't exist anymore."),
+                ephemeral=True
+            )
+        if role in interaction.user.roles:
+            await interaction.user.remove_roles(role, reason="Ping role panel")
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    description=f"✅ Removed **{role.name}** from your roles.",
+                    color=0xFF6B35
+                ),
+                ephemeral=True
+            )
+        else:
+            await interaction.user.add_roles(role, reason="Ping role panel")
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    description=f"✅ Added **{role.name}** to your roles.",
+                    color=0x2ECC71
+                ),
+                ephemeral=True
+            )
+
+@bot.tree.command(name="pingroles_panel", description="[ADMIN] Post the ping roles panel")
+@app_commands.checks.has_permissions(administrator=True)
+async def pingroles_panel(interaction: discord.Interaction):
+    await interaction.response.defer()
+    e = discord.Embed(
+        title="🔔  Notification Roles",
+        description=(
+            "Click the buttons below to **add or remove** ping roles.\n"
+            "Click again to toggle them off.\n\u200b"
+        ),
+        color=BRAND_COLOR
+    )
+    for emoji, label, role_id in PING_ROLES:
+        e.add_field(
+            name=f"{emoji}  {label}",
+            value=f"<@&{role_id}>",
+            inline=True
+        )
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Toggle anytime")
+    await interaction.followup.send(embed=e, view=PingRoleView())
+
+
+@bot.tree.command(name="force_release", description="[ADMIN] Force release a player from their team")
+@app_commands.describe(player="Player to release")
+@app_commands.checks.has_permissions(administrator=True)
+async def force_release(interaction: discord.Interaction, player: discord.Member):
+    await interaction.response.defer()
+    config = await get_config(interaction.guild.id)
+    db = await get_db()
+    cur = await db.execute("SELECT id, team_id FROM players WHERE discord_id=?", (player.id,))
+    p = await cur.fetchone()
+    if not p:
+        return await interaction.followup.send(embed=error_embed("Not Registered", f"{player.mention} isn't in the league."))
+    if not p[1]:
+        return await interaction.followup.send(embed=error_embed("Not On A Team", f"{player.mention} is already a free agent."))
+
+    cur2 = await db.execute("SELECT name FROM teams WHERE id=?", (p[1],))
+    team = await cur2.fetchone()
+    team_name = team[0] if team else "Unknown"
+
+    await db.execute("UPDATE players SET team_id=NULL, free_agent=1 WHERE discord_id=?", (player.id,))
+    await db.execute("INSERT INTO transactions (player_id, from_team, type) VALUES (?,?,?)", (p[0], p[1], "RELEASE"))
+    await db.commit()
+
+    # Remove team role, add FA role
+    await remove_team_role_fn(player, interaction.guild, p[1])
+    fa_role = interaction.guild.get_role(FA_ROLE_ID)
+    if fa_role and fa_role not in player.roles:
+        try:
+            await player.add_roles(fa_role, reason="HCBB: Force released")
+        except discord.Forbidden:
+            pass
+
+    e = discord.Embed(color=0xFF4444)
+    e.set_author(name="⚡  Force Released", icon_url=player.display_avatar.url)
+    e.set_thumbnail(url=player.display_avatar.url)
+    e.description = f"**{player.display_name}** has been force released from **{team_name}**."
+    e.add_field(name="👤 Player", value=player.mention, inline=True)
+    e.add_field(name="📤 From", value=f"**{team_name}**", inline=True)
+    e.add_field(name="📌 Status", value="🆓 Free Agent", inline=True)
+    e.add_field(name="🔨 Released By", value=interaction.user.mention, inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+    tx = discord.Embed(color=0xFF4444)
+    tx.set_author(name="⚡  Transaction Wire — FORCE RELEASED", icon_url=player.display_avatar.url)
+    tx.set_thumbnail(url=player.display_avatar.url)
+    tx.description = f"**{player.display_name}** force released from **{team_name}**"
+    tx.add_field(name="👤 Player", value=player.mention, inline=True)
+    tx.add_field(name="📤 From", value=f"**{team_name}**", inline=True)
+    tx.add_field(name="📌 Status", value="🆓 Free Agent", inline=True)
+    tx.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await post_transaction(interaction.guild, config, tx)
+
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
     def __init__(self):
@@ -2016,6 +2145,7 @@ async def on_ready():
 
 async def main():
     async with bot:
+        bot.add_view(PingRoleView())
         await bot.start(TOKEN)
 
 if __name__ == "__main__":
