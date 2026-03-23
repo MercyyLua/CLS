@@ -30,7 +30,6 @@ TEAM_DATA = [
     ("St Louis Archers",        "STL",  1478111948313989160),
     ("Philadelphia Surge",      "PHI",  1483156350258254084),
     ("Seattle Sonics",          "SEA",  1481717125877071992),
-    ("Baltimore Ospreys",       "BAL",  1481718253536546888),
     ("Los Angeles Reapers",     "LAR",  1482413661824745602),
     ("Chicago Ravens",          "CHI",  1483336220544077924),
     ("Arizona Firebirds",       "ARI",  1482435095938732042),
@@ -40,6 +39,14 @@ TEAM_DATA = [
     ("Miami Sharks",            "MIA",  1483695684199645256),
     ("San Francisco JailBirds", "SFJ",  1481718381760479446),
 ]
+
+WESTERN = ["SEA","ARI","SFJ","SDT","DAL","LAR"]
+EASTERN = ["IOWA","STL","PHI","MIA","CHI","HOU"]
+
+DIVISION_EMOJIS = {
+    "WESTERN": "🌅",
+    "EASTERN": "🌆",
+}
 
 # Team emoji map
 TEAM_EMOJIS = {
@@ -55,7 +62,6 @@ TEAM_EMOJIS = {
     "MIA":  "<:MiamiSharks:1478099812875243686>",
     "SFJ":  "<:SanFranciscoJailBirds:1478099356048429099>",
     "CHI":  "<:ChicagoRavens:1478100433456336938>",
-    "BAL":  "<:BaltimoreOspreys:1478100228480696473>",
 }
 
 # Week 1 Schedule — Round 1 — Monday March 30th
@@ -152,19 +158,38 @@ async def init_db():
     """)
     await db.commit()
 
+    # Add division column if not exists
+    try:
+        await db.execute("ALTER TABLE teams ADD COLUMN division TEXT DEFAULT ''")
+        await db.commit()
+    except:
+        pass
+
+    # Remove Baltimore Ospreys if exists
+    cur_bal = await db.execute("SELECT id FROM teams WHERE abbreviation='BAL'")
+    bal = await cur_bal.fetchone()
+    if bal:
+        await db.execute("UPDATE players SET team_id=NULL, free_agent=1 WHERE team_id=?", (bal[0],))
+        await db.execute("DELETE FROM team_roles WHERE team_id=?", (bal[0],))
+        await db.execute("DELETE FROM teams WHERE id=?", (bal[0],))
+        await db.commit()
+        print("  🗑️ Removed Baltimore Ospreys")
+
     # Seed teams and link roles
     for name, abbr, role_id in TEAM_DATA:
+        division = "WESTERN" if abbr in WESTERN else "EASTERN"
         cur = await db.execute("SELECT id FROM teams WHERE abbreviation=?", (abbr,))
         row = await cur.fetchone()
         if not row:
             cur2 = await db.execute(
-                "INSERT INTO teams (name, abbreviation, owner_id) VALUES (?,?,?)",
-                (name, abbr, 0)
+                "INSERT INTO teams (name, abbreviation, owner_id, division) VALUES (?,?,?,?)",
+                (name, abbr, 0, division)
             )
             team_id = cur2.lastrowid
-            print(f"  ✅ Seeded team: {name} [{abbr}]")
+            print(f"  ✅ Seeded team: {name} [{abbr}] — {division}")
         else:
             team_id = row[0]
+            await db.execute("UPDATE teams SET division=? WHERE id=?", (division, team_id))
         await db.execute("""
             INSERT INTO team_roles (team_id, role_id) VALUES (?,?)
             ON CONFLICT(team_id) DO UPDATE SET role_id=excluded.role_id
@@ -334,43 +359,62 @@ async def team_info(interaction: discord.Interaction, team: discord.Role):
     e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="standings", description="View league standings")
+@bot.tree.command(name="standings", description="View league standings by division")
 async def standings(interaction: discord.Interaction):
     await interaction.response.defer()
     db = await get_db()
-    cur = await db.execute("SELECT name, abbreviation, wins, losses FROM teams ORDER BY wins DESC, losses ASC")
+    cur = await db.execute("SELECT name, abbreviation, wins, losses, division FROM teams ORDER BY division, wins DESC, losses ASC")
     rows = await cur.fetchall()
     if not rows:
         return await interaction.followup.send(embed=warn_embed("No Teams Yet"))
 
-    medals = ["🥇","🥈","🥉"] + [f"{i}." for i in range(4, 20)]
+    def build_table(teams):
+        if not teams:
+            return "```No teams```"
+        first_w, first_l = teams[0][2], teams[0][3]
+        lines = [f"{'#':<3} {'TEAM':<24} {'W':>3} {'L':>3} {'PCT':>6} {'GB':>5}"]
+        lines.append("─" * 43)
+        for i, (name, abbr, w, l, div) in enumerate(teams, 1):
+            total = w + l
+            pct = (w / total) if total else 0.0
+            if i == 1:
+                gb_str = "  —"
+            else:
+                gb = ((first_w - first_l) - (w - l)) / 2
+                gb_str = f"{gb:>4.1f}" if gb > 0 else "  —"
+            emoji = TEAM_EMOJIS.get(abbr, "⚾")
+            lines.append(f"{i:<3} {name:<24} {w:>3} {l:>3} {pct:>6.3f} {gb_str:>5}")
+        return "```" + "\n".join(lines) + "```"
 
-    # Header
-    header = "```"
-    header += f"{'#':<3} {'TEAM':<26} {'W':>3} {'L':>3} {'PCT':>6} {'GB':>5}\n"
-    header += "─" * 45 + "\n"
-
-    first_w = rows[0][2]
-    first_l = rows[0][3]
-
-    body_lines = []
-    for i, (name, abbr, w, l) in enumerate(rows, 1):
-        total = w + l
-        pct = (w / total) if total else 0.0
-        if i == 1:
-            gb_str = "  —"
-        else:
-            gb = ((first_w - first_l) - (w - l)) / 2
-            gb_str = f"{gb:>4.1f}" if gb > 0 else "  —"
-        medal = medals[i - 1]
-        body_lines.append(f"{medal:<3} {name:<26} {w:>3} {l:>3} {pct:>6.3f} {gb_str:>5}")
-
-    table = header + "\n".join(body_lines) + "```"
+    western = [(n,a,w,l,d) for n,a,w,l,d in rows if d == "WESTERN"]
+    eastern = [(n,a,w,l,d) for n,a,w,l,d in rows if d == "EASTERN"]
 
     e = discord.Embed(color=0xFFD700)
     e.set_author(name="🏆  CLS League — Standings")
-    e.description = table
-    e.set_footer(text=f"⚾ HCBB 9v9 2.0 League  ·  {len(rows)} teams")
+
+    if western:
+        w_lines = []
+        first_w, first_l = western[0][2], western[0][3]
+        for i, (name, abbr, w, l, d) in enumerate(western, 1):
+            total = w + l
+            pct = (w / total) if total else 0.0
+            gb = "—" if i == 1 else f"{((first_w-first_l)-(w-l))/2:.1f}"
+            emoji = TEAM_EMOJIS.get(abbr, "⚾")
+            w_lines.append(f"`{i}.` {emoji} **{name}** — `{w}W {l}L` · `{pct:.3f}` · GB: `{gb}`")
+        e.add_field(name="🌅  Western Conference", value="\n".join(w_lines), inline=False)
+
+    if eastern:
+        e_lines = []
+        first_w, first_l = eastern[0][2], eastern[0][3]
+        for i, (name, abbr, w, l, d) in enumerate(eastern, 1):
+            total = w + l
+            pct = (w / total) if total else 0.0
+            gb = "—" if i == 1 else f"{((first_w-first_l)-(w-l))/2:.1f}"
+            emoji = TEAM_EMOJIS.get(abbr, "⚾")
+            e_lines.append(f"`{i}.` {emoji} **{name}** — `{w}W {l}L` · `{pct:.3f}` · GB: `{gb}`")
+        e.add_field(name="🌆  Eastern Conference", value="\n".join(e_lines), inline=False)
+
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Top 3 per division + 2 wild cards advance to playoffs")
     await interaction.followup.send(embed=e)
 
 @bot.tree.command(name="team_delete", description="[ADMIN] Delete a team")
@@ -1681,6 +1725,265 @@ class BulkStatsModal(discord.ui.Modal, title="Submit Player Stats"):
             e.add_field(name=f"Errors ({len(errors)})", value="\n".join(errors), inline=False)
         e.set_footer(text="⚾ HCBB 9v9 2.0 League")
         await interaction.followup.send(embed=e, ephemeral=True)
+
+
+# ── PLAYOFFS & WILDCARD ───────────────────────────────────────────
+@bot.tree.command(name="playoff_bracket", description="[ADMIN] Generate playoff bracket from current standings")
+@app_commands.checks.has_permissions(administrator=True)
+async def playoff_bracket(interaction: discord.Interaction):
+    await interaction.response.defer()
+    db = await get_db()
+    cur = await db.execute("SELECT name, abbreviation, wins, losses, division FROM teams ORDER BY division, wins DESC, losses ASC")
+    rows = await cur.fetchall()
+
+    western = [(n,a,w,l) for n,a,w,l,d in rows if d == "WESTERN"]
+    eastern = [(n,a,w,l) for n,a,w,l,d in rows if d == "EASTERN"]
+
+    # Top 3 per division + 2 wild cards (best remaining records)
+    w_seeds = western[:3]
+    e_seeds = eastern[:3]
+    w_remaining = western[3:]
+    e_remaining = eastern[3:]
+    all_remaining = sorted(w_remaining + e_remaining, key=lambda x: (-(x[2]/(x[2]+x[3]) if x[2]+x[3] else 0)))
+    wildcards = all_remaining[:2]
+
+    # Playoff seeding: W1, W2, W3, E1, E2, E3, WC1, WC2
+    seeds = w_seeds + e_seeds + wildcards
+
+    lines = ["**🏆  CLS LEAGUE PLAYOFFS**", ""]
+    lines.append("**🌅 Western Conference**")
+    for i, (name, abbr, w, l) in enumerate(w_seeds, 1):
+        emoji = TEAM_EMOJIS.get(abbr, "⚾")
+        lines.append(f"W{i}. {emoji} **{name}** `{w}W-{l}L`")
+
+    lines.append("")
+    lines.append("**🌆 Eastern Conference**")
+    for i, (name, abbr, w, l) in enumerate(e_seeds, 1):
+        emoji = TEAM_EMOJIS.get(abbr, "⚾")
+        lines.append(f"E{i}. {emoji} **{name}** `{w}W-{l}L`")
+
+    if wildcards:
+        lines.append("")
+        lines.append("**🃏 Wild Cards**")
+        for i, (name, abbr, w, l) in enumerate(wildcards, 1):
+            emoji = TEAM_EMOJIS.get(abbr, "⚾")
+            lines.append(f"WC{i}. {emoji} **{name}** `{w}W-{l}L`")
+
+    lines.append("")
+    lines.append("**📋 First Round Matchups**")
+    if len(seeds) >= 4:
+        n1, a1, _, _ = seeds[0]
+        n2, a2, _, _ = seeds[-1]
+        n3, a3, _, _ = seeds[1]
+        n4, a4, _, _ = seeds[-2]
+        lines.append(f"{TEAM_EMOJIS.get(a1,'⚾')} **{n1}** vs {TEAM_EMOJIS.get(a2,'⚾')} **{n2}**")
+        lines.append(f"{TEAM_EMOJIS.get(a3,'⚾')} **{n3}** vs {TEAM_EMOJIS.get(a4,'⚾')} **{n4}**")
+
+    await interaction.followup.send("\n".join(lines))
+
+# ── ALL STAR ──────────────────────────────────────────────────────
+@bot.tree.command(name="allstar_add", description="[ADMIN] Add a player to the All-Star roster")
+@app_commands.describe(player="Player to add", conference="WESTERN or EASTERN")
+@app_commands.choices(conference=[
+    app_commands.Choice(name="Western Conference", value="WESTERN"),
+    app_commands.Choice(name="Eastern Conference", value="EASTERN"),
+])
+@app_commands.checks.has_permissions(administrator=True)
+async def allstar_add(interaction: discord.Interaction, player: discord.Member, conference: str):
+    await interaction.response.defer()
+    db = await get_db()
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS allstar (
+            discord_id INTEGER NOT NULL,
+            conference TEXT NOT NULL,
+            PRIMARY KEY (discord_id, conference)
+        )
+    """)
+    await db.execute("INSERT OR IGNORE INTO allstar (discord_id, conference) VALUES (?,?)", (player.id, conference))
+    await db.commit()
+    conf_emoji = "🌅" if conference == "WESTERN" else "🌆"
+    e = success_embed("All-Star Added!", f"{player.mention} added to the {conf_emoji} **{conference}** All-Star roster.")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="allstar_roster", description="View the All-Star rosters")
+async def allstar_roster(interaction: discord.Interaction):
+    await interaction.response.defer()
+    db = await get_db()
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS allstar (
+            discord_id INTEGER NOT NULL,
+            conference TEXT NOT NULL,
+            PRIMARY KEY (discord_id, conference)
+        )
+    """)
+    cur = await db.execute("""
+        SELECT a.discord_id, a.conference, p.position, p.rblx_username
+        FROM allstar a
+        LEFT JOIN players p ON p.discord_id = a.discord_id
+        ORDER BY a.conference, p.position
+    """)
+    rows = await cur.fetchall()
+    if not rows:
+        return await interaction.followup.send(embed=warn_embed("No All-Stars Yet", "Use `/allstar_add` to build the rosters."))
+
+    western = [(did, pos, rblx) for did, conf, pos, rblx in rows if conf == "WESTERN"]
+    eastern = [(did, pos, rblx) for did, conf, pos, rblx in rows if conf == "EASTERN"]
+
+    e = discord.Embed(title="⭐  All-Star Game Rosters", color=0xFFD700)
+    if western:
+        lines = [f"{POSITION_EMOJIS.get(pos or '','⚾')} <@{did}>{f' (`{rblx}`)' if rblx else ''}" for did, pos, rblx in western]
+        e.add_field(name=f"🌅 Western Conference ({len(western)})", value="\n".join(lines), inline=False)
+    if eastern:
+        lines = [f"{POSITION_EMOJIS.get(pos or '','⚾')} <@{did}>{f' (`{rblx}`)' if rblx else ''}" for did, pos, rblx in eastern]
+        e.add_field(name=f"🌆 Eastern Conference ({len(eastern)})", value="\n".join(lines), inline=False)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League All-Star Game")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="allstar_clear", description="[ADMIN] Clear All-Star rosters")
+@app_commands.checks.has_permissions(administrator=True)
+async def allstar_clear(interaction: discord.Interaction):
+    await interaction.response.defer()
+    db = await get_db()
+    await db.execute("DELETE FROM allstar")
+    await db.commit()
+    await interaction.followup.send(embed=success_embed("All-Star Rosters Cleared"))
+
+# ── HR DERBY ──────────────────────────────────────────────────────
+@bot.tree.command(name="hrderbry_add", description="[ADMIN] Add a player to the HR Derby")
+@app_commands.describe(player="Player to add to HR Derby")
+@app_commands.checks.has_permissions(administrator=True)
+async def hrderby_add(interaction: discord.Interaction, player: discord.Member):
+    await interaction.response.defer()
+    db = await get_db()
+    await db.execute("CREATE TABLE IF NOT EXISTS hrderby (discord_id INTEGER PRIMARY KEY, home_runs INTEGER DEFAULT 0)")
+    await db.execute("INSERT OR IGNORE INTO hrderby (discord_id) VALUES (?)", (player.id,))
+    await db.commit()
+    await interaction.followup.send(embed=success_embed("Added to HR Derby!", f"{player.mention} is in the HR Derby."))
+
+@bot.tree.command(name="hrderby_score", description="[ADMIN] Update a player's HR Derby home run count")
+@app_commands.describe(player="Player", home_runs="Number of home runs hit")
+@app_commands.checks.has_permissions(administrator=True)
+async def hrderby_score(interaction: discord.Interaction, player: discord.Member, home_runs: int):
+    await interaction.response.defer()
+    db = await get_db()
+    await db.execute("UPDATE hrderby SET home_runs=? WHERE discord_id=?", (home_runs, player.id))
+    await db.commit()
+    await interaction.followup.send(embed=success_embed("Score Updated", f"{player.mention}: **{home_runs} HR**"))
+
+@bot.tree.command(name="hrderby_standings", description="View HR Derby leaderboard")
+async def hrderby_standings(interaction: discord.Interaction):
+    await interaction.response.defer()
+    db = await get_db()
+    await db.execute("CREATE TABLE IF NOT EXISTS hrderby (discord_id INTEGER PRIMARY KEY, home_runs INTEGER DEFAULT 0)")
+    cur = await db.execute("SELECT discord_id, home_runs FROM hrderby ORDER BY home_runs DESC")
+    rows = await cur.fetchall()
+    if not rows:
+        return await interaction.followup.send(embed=warn_embed("No Participants", "No one is in the HR Derby yet."))
+    medals = ["🥇","🥈","🥉"] + [f"`{i}.`" for i in range(4, 20)]
+    e = discord.Embed(title="💪  HR Derby Leaderboard", color=0xFF4500)
+    lines = [f"{medals[i]} <@{did}> — **{hr} HR**" for i, (did, hr) in enumerate(rows)]
+    e.description = "\n".join(lines)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League — HR Derby")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="hrderby_clear", description="[ADMIN] Clear the HR Derby")
+@app_commands.checks.has_permissions(administrator=True)
+async def hrderby_clear(interaction: discord.Interaction):
+    await interaction.response.defer()
+    db = await get_db()
+    await db.execute("DELETE FROM hrderby")
+    await db.commit()
+    await interaction.followup.send(embed=success_embed("HR Derby Cleared"))
+
+# ── AWARDS ────────────────────────────────────────────────────────
+AWARD_TYPES = ["MVP","Cy Young","Rookie of the Year","Golden Glove","Silver Slugger","Manager of the Year","Champion"]
+
+@bot.tree.command(name="give_award", description="[ADMIN] Give a league award to a player")
+@app_commands.describe(player="Player receiving the award", award="Award type")
+@app_commands.choices(award=[app_commands.Choice(name=a, value=a) for a in AWARD_TYPES])
+@app_commands.checks.has_permissions(administrator=True)
+async def give_award(interaction: discord.Interaction, player: discord.Member, award: str):
+    await interaction.response.defer()
+    db = await get_db()
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS awards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id INTEGER NOT NULL,
+            award TEXT NOT NULL,
+            season TEXT DEFAULT 'Season 1',
+            given_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.execute("INSERT INTO awards (discord_id, award) VALUES (?,?)", (player.id, award))
+    await db.commit()
+    award_emojis = {
+        "MVP": "🏆", "Cy Young": "⚾", "Rookie of the Year": "🌟",
+        "Golden Glove": "🧤", "Silver Slugger": "🥈", "Manager of the Year": "👔", "Champion": "💍"
+    }
+    emoji = award_emojis.get(award, "🏅")
+    e = discord.Embed(color=0xFFD700)
+    e.set_author(name=f"{emoji}  Award Ceremony", icon_url=player.display_avatar.url)
+    e.set_thumbnail(url=player.display_avatar.url)
+    e.description = f"{player.mention} has been awarded the **{award}**!"
+    e.add_field(name="Award", value=f"{emoji} **{award}**", inline=True)
+    e.add_field(name="Recipient", value=player.mention, inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="awards", description="View all league awards")
+async def awards(interaction: discord.Interaction):
+    await interaction.response.defer()
+    db = await get_db()
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS awards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id INTEGER NOT NULL,
+            award TEXT NOT NULL,
+            season TEXT DEFAULT 'Season 1',
+            given_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur = await db.execute("SELECT discord_id, award, season FROM awards ORDER BY given_at DESC")
+    rows = await cur.fetchall()
+    if not rows:
+        return await interaction.followup.send(embed=warn_embed("No Awards Yet"))
+    award_emojis = {
+        "MVP": "🏆", "Cy Young": "⚾", "Rookie of the Year": "🌟",
+        "Golden Glove": "🧤", "Silver Slugger": "🥈", "Manager of the Year": "👔", "Champion": "💍"
+    }
+    e = discord.Embed(title="🏅  League Awards", color=0xFFD700)
+    lines = [f"{award_emojis.get(award,'🏅')} **{award}** — <@{did}> _{season}_" for did, award, season in rows]
+    e.description = "\n".join(lines)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="player_awards", description="View awards for a specific player")
+@app_commands.describe(player="Player to check")
+async def player_awards(interaction: discord.Interaction, player: discord.Member = None):
+    await interaction.response.defer()
+    target = player or interaction.user
+    db = await get_db()
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS awards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id INTEGER NOT NULL,
+            award TEXT NOT NULL,
+            season TEXT DEFAULT 'Season 1',
+            given_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur = await db.execute("SELECT award, season FROM awards WHERE discord_id=? ORDER BY given_at DESC", (target.id,))
+    rows = await cur.fetchall()
+    award_emojis = {"MVP":"🏆","Cy Young":"⚾","Rookie of the Year":"🌟","Golden Glove":"🧤","Silver Slugger":"🥈","Manager of the Year":"👔","Champion":"💍"}
+    e = discord.Embed(color=0xFFD700)
+    e.set_author(name=f"{target.display_name}'s Awards", icon_url=target.display_avatar.url)
+    e.set_thumbnail(url=target.display_avatar.url)
+    if rows:
+        lines = [f"{award_emojis.get(award,'🏅')} **{award}** — _{season}_" for award, season in rows]
+        e.description = "\n".join(lines)
+    else:
+        e.description = "_No awards yet._"
+    await interaction.followup.send(embed=e)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
