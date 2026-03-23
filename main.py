@@ -2044,22 +2044,15 @@ class PingRoleButton(discord.ui.Button):
 @app_commands.checks.has_permissions(administrator=True)
 async def pingroles_panel(interaction: discord.Interaction):
     await interaction.response.defer()
-    e = discord.Embed(
-        title="🔔  Notification Roles",
-        description=(
-            "Click the buttons below to **add or remove** ping roles.\n"
-            "Click again to toggle them off.\n\u200b"
-        ),
-        color=BRAND_COLOR
-    )
+
+    lines = ["**Get Your Role To Get Notified About**", ""]
     for emoji, label, role_id in PING_ROLES:
-        e.add_field(
-            name=f"{emoji}  {label}",
-            value=f"<@&{role_id}>",
-            inline=True
-        )
-    e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Toggle anytime")
-    await interaction.followup.send(embed=e, view=PingRoleView())
+        lines.append(f"{emoji} - {label.upper()}")
+    lines.append("")
+    lines.append("*Click a button below to get the role!*")
+    lines.append("*Click again to remove it*")
+
+    await interaction.followup.send("\n".join(lines), view=PingRoleView())
 
 
 @bot.tree.command(name="force_release", description="[ADMIN] Force release a player from their team")
