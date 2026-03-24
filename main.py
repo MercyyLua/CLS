@@ -146,6 +146,12 @@ async def init_db():
             discord_id INTEGER NOT NULL,
             PRIMARY KEY (team_id, discord_id)
         );
+        CREATE TABLE IF NOT EXISTS lineups (
+            team_id    INTEGER PRIMARY KEY REFERENCES teams(id),
+            lineup     TEXT,
+            bullpen    TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS suspensions (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             discord_id INTEGER NOT NULL,
@@ -2233,6 +2239,137 @@ __**Miscellaneous**__
 - Broken Glove Award (Most errors/Worst lowlight of the season)
 - Whiff Award (Most Batting Strikeouts)"""
     await interaction.followup.send(msg)
+
+
+# ── LINEUP & BULLPEN ─────────────────────────────────────────────
+@bot.tree.command(name="set_lineup", description="Set your team's batting lineup and bullpen")
+@app_commands.describe(
+    team="Your team",
+    lineup="Batting order — one player per line or comma separated",
+    bullpen="Pitchers — one per line or comma separated (optional)"
+)
+async def set_lineup(interaction: discord.Interaction, team: discord.Role, lineup: str, bullpen: str = None):
+    await interaction.response.defer()
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Team Not Found"))
+    is_owner = row[3] == interaction.user.id
+    db = await get_db()
+    cur_mgr = await db.execute("SELECT 1 FROM team_managers WHERE team_id=? AND discord_id=?", (row[0], interaction.user.id))
+    is_mgr = await cur_mgr.fetchone() is not None
+    if not is_owner and not is_mgr and not interaction.user.guild_permissions.administrator:
+        return await interaction.followup.send(embed=error_embed("Not Authorized", "Only the team owner or manager can set the lineup."))
+    await db.execute("""
+        INSERT INTO lineups (team_id, lineup, bullpen) VALUES (?,?,?)
+        ON CONFLICT(team_id) DO UPDATE SET lineup=excluded.lineup, bullpen=excluded.bullpen, updated_at=CURRENT_TIMESTAMP
+    """, (row[0], lineup, bullpen))
+    await db.commit()
+    e = success_embed(f"Lineup Set — {row[1]}")
+    e.add_field(name="⚾ Batting Order", value=lineup[:1024], inline=False)
+    if bullpen:
+        e.add_field(name="🌀 Bullpen", value=bullpen[:1024], inline=False)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="lineup", description="View a team's lineup and bullpen")
+@app_commands.describe(team="The team to view")
+async def view_lineup(interaction: discord.Interaction, team: discord.Role):
+    await interaction.response.defer()
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Team Not Found"))
+    db = await get_db()
+    cur = await db.execute("SELECT lineup, bullpen, updated_at FROM lineups WHERE team_id=?", (row[0],))
+    lu = await cur.fetchone()
+    if not lu or not lu[0]:
+        return await interaction.followup.send(embed=warn_embed("No Lineup Set", f"**{row[1]}** hasn't set a lineup yet."))
+    e = discord.Embed(title=f"📋  {row[1]} — Lineup", color=BRAND_COLOR)
+    e.add_field(name="⚾ Batting Order", value=lu[0][:1024], inline=False)
+    if lu[1]:
+        e.add_field(name="🌀 Bullpen", value=lu[1][:1024], inline=False)
+    if lu[2]:
+        e.set_footer(text=f"⚾ HCBB 9v9 2.0 League  ·  Updated {lu[2][:10]}")
+    await interaction.followup.send(embed=e)
+
+# ── AUTO ALL-STAR ─────────────────────────────────────────────────
+@bot.tree.command(name="allstar_auto", description="[ADMIN] Auto-select All-Stars based on top stats per conference")
+@app_commands.describe(players_per_conf="How many players per conference (default 9)")
+@app_commands.checks.has_permissions(administrator=True)
+async def allstar_auto(interaction: discord.Interaction, players_per_conf: int = 9):
+    await interaction.response.defer()
+    db = await get_db()
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS allstar (
+            discord_id INTEGER NOT NULL,
+            conference TEXT NOT NULL,
+            PRIMARY KEY (discord_id, conference)
+        )
+    """)
+
+    results = {"WESTERN": [], "EASTERN": []}
+    for conf, abbrs in [("WESTERN", WESTERN), ("EASTERN", EASTERN)]:
+        placeholders = ",".join("?" * len(abbrs))
+        cur = await db.execute(f"""
+            SELECT p.discord_id, p.username, p.position,
+                   (p.batting_avg * 100 + p.home_runs * 2 + p.rbi) as score
+            FROM players p
+            JOIN teams t ON t.id = p.team_id
+            WHERE t.abbreviation IN ({placeholders})
+            ORDER BY score DESC
+            LIMIT ?
+        """, (*abbrs, players_per_conf))
+        rows = await cur.fetchall()
+        for did, uname, pos, score in rows:
+            await db.execute("INSERT OR IGNORE INTO allstar (discord_id, conference) VALUES (?,?)", (did, conf))
+            results[conf].append((did, uname, pos))
+    await db.commit()
+
+    e = discord.Embed(title="⭐  All-Stars Auto-Selected", color=0xFFD700)
+    for conf, players in results.items():
+        emoji = "🌅" if conf == "WESTERN" else "🌆"
+        if players:
+            lines = [f"{POSITION_EMOJIS.get(pos,'⚾')} **{u}** <@{did}>" for did, u, pos in players]
+            e.add_field(name=f"{emoji} {conf} ({len(players)})", value="\n".join(lines), inline=False)
+        else:
+            e.add_field(name=f"{emoji} {conf}", value="_No players with stats yet_", inline=False)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Use /allstar_roster to view full rosters")
+    await interaction.followup.send(embed=e)
+
+# ── AUTO HR DERBY ─────────────────────────────────────────────────
+@bot.tree.command(name="hrderby_auto", description="[ADMIN] Auto-select top HR hitters for the HR Derby")
+@app_commands.describe(top_n="How many players to select (default 8)")
+@app_commands.checks.has_permissions(administrator=True)
+async def hrderby_auto(interaction: discord.Interaction, top_n: int = 8):
+    await interaction.response.defer()
+    db = await get_db()
+    await db.execute("CREATE TABLE IF NOT EXISTS hrderby (discord_id INTEGER PRIMARY KEY, home_runs INTEGER DEFAULT 0)")
+
+    cur = await db.execute("""
+        SELECT p.discord_id, p.username, p.home_runs, t.name
+        FROM players p
+        LEFT JOIN teams t ON t.id = p.team_id
+        WHERE p.home_runs > 0
+        ORDER BY p.home_runs DESC
+        LIMIT ?
+    """, (top_n,))
+    rows = await cur.fetchall()
+
+    if not rows:
+        return await interaction.followup.send(embed=warn_embed("No Stats", "No players have home run stats yet."))
+
+    for did, uname, hr, tname in rows:
+        await db.execute("INSERT OR REPLACE INTO hrderby (discord_id, home_runs) VALUES (?,?)", (did, hr))
+    await db.commit()
+
+    medals = ["🥇","🥈","🥉"] + [f"`{i}.`" for i in range(4, 20)]
+    e = discord.Embed(title="💪  HR Derby — Auto Selected", color=0xFF4500)
+    lines = []
+    for i, (did, uname, hr, tname) in enumerate(rows):
+        team_str = f"({tname})" if tname else "(FA)"
+        lines.append(f"{medals[i]} **{uname}** {team_str} — `{hr} HR`")
+    e.description = "\n".join(lines)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Use /hrderby_standings to view live leaderboard")
+    await interaction.followup.send(embed=e)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
