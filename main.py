@@ -660,14 +660,28 @@ async def free_agents(interaction: discord.Interaction):
     db = await get_db()
     cur = await db.execute("SELECT discord_id, username, rblx_username, position FROM players WHERE free_agent=1 ORDER BY position")
     fas = await cur.fetchall()
-    fa_role = interaction.guild.get_role(FA_ROLE_ID)
-    fa_role_str = f"{fa_role.mention} — " if fa_role else ""
+
     if not fas:
-        return await interaction.followup.send(embed=warn_embed("No Free Agents", f"{fa_role_str}Everyone is signed!"))
-    e = base_embed("🆓 Free Agent Board", f"{fa_role_str}**{len(fas)} available players**")
-    lines = [f"{POSITION_EMOJIS.get(pos,'⚾')} **{u}**{f' (`{rblx}`)' if rblx else ''} — `{pos}`  (<@{did}>)" for did, u, rblx, pos in fas]
-    e.description += "\n\n" + "\n".join(lines)
-    await interaction.followup.send(embed=e)
+        return await interaction.followup.send("❌ No free agents — everyone is signed!")
+
+    # Build plain text pages of 15
+    pages = []
+    chunk_size = 15
+    for i in range(0, len(fas), chunk_size):
+        chunk = fas[i:i + chunk_size]
+        lines = [f"🆓 **Free Agents** — {len(fas)} available\n"]
+        for did, u, rblx, pos in chunk:
+            emoji = POSITION_EMOJIS.get(pos, "⚾")
+            rblx_str = f" (`{rblx}`)" if rblx else ""
+            lines.append(f"{emoji} **{u}**{rblx_str} — {pos}")
+        page_num = len(pages) + 1
+        total_pages = -(-len(fas) // chunk_size)
+        if total_pages > 1:
+            lines.append(f"\nPage {page_num}/{total_pages}")
+        pages.append("\n".join(lines))
+
+    view = FAPageView(interaction.user.id, pages)
+    await interaction.followup.send(pages[0], view=view)
 
 @bot.tree.command(name="transactions", description="View recent transactions")
 async def transactions(interaction: discord.Interaction):
@@ -2106,6 +2120,74 @@ async def force_release(interaction: discord.Interaction, player: discord.Member
     tx.add_field(name="📌 Status", value="🆓 Free Agent", inline=True)
     tx.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await post_transaction(interaction.guild, config, tx)
+
+
+@bot.tree.command(name="team_rename", description="[ADMIN] Rename a team")
+@app_commands.describe(
+    team="The team to rename",
+    new_name="New full team name e.g. Brooklyn Bears",
+    new_abbreviation="New abbreviation e.g. BRK (optional)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def team_rename(interaction: discord.Interaction, team: discord.Role, new_name: str, new_abbreviation: str = None):
+    await interaction.response.defer()
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Team Not Found", f"{team.mention} isn't linked to a team."))
+    db = await get_db()
+    old_name = row[1]
+    old_abbr = row[2]
+
+    if new_abbreviation:
+        new_abbreviation = new_abbreviation.upper()
+        # Check abbreviation not taken
+        cur = await db.execute("SELECT id FROM teams WHERE abbreviation=? AND id!=?", (new_abbreviation, row[0]))
+        if await cur.fetchone():
+            return await interaction.followup.send(embed=error_embed("Abbreviation Taken", f"`{new_abbreviation}` is already used by another team."))
+        await db.execute("UPDATE teams SET name=?, abbreviation=? WHERE id=?", (new_name, new_abbreviation, row[0]))
+    else:
+        await db.execute("UPDATE teams SET name=? WHERE id=?", (new_name, row[0]))
+    await db.commit()
+
+    # Update TEAM_EMOJIS key if abbreviation changed
+    final_abbr = new_abbreviation if new_abbreviation else old_abbr
+
+    e = success_embed("Team Renamed ✏️")
+    e.add_field(name="Before", value=f"**{old_name}** `{old_abbr}`", inline=True)
+    e.add_field(name="After", value=f"**{new_name}** `{final_abbr}`", inline=True)
+    e.add_field(name="Role", value=team.mention, inline=False)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+
+class FAPageView(discord.ui.View):
+    def __init__(self, user_id: int, pages: list):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.pages = pages
+        self.index = 0
+        self.prev_btn.disabled = True
+        self.next_btn.disabled = len(pages) <= 1
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ These buttons aren't for you.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index -= 1
+        self.prev_btn.disabled = self.index == 0
+        self.next_btn.disabled = self.index == len(self.pages) - 1
+        await interaction.response.edit_message(content=self.pages[self.index], view=self)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index += 1
+        self.prev_btn.disabled = self.index == 0
+        self.next_btn.disabled = self.index == len(self.pages) - 1
+        await interaction.response.edit_message(content=self.pages[self.index], view=self)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
