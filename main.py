@@ -1910,7 +1910,18 @@ async def hrderby_clear(interaction: discord.Interaction):
     await interaction.followup.send(embed=success_embed("HR Derby Cleared"))
 
 # ── AWARDS ────────────────────────────────────────────────────────
-AWARD_TYPES = ["MVP","Cy Young","Rookie of the Year","Golden Glove","Silver Slugger","Manager of the Year","Champion"]
+AWARD_TYPES = [
+    "MVP",
+    "Cy Young Award",
+    "Silver Slugger",
+    "Batting Title",
+    "Rookie of the Year",
+    "Manager of the Year",
+    "Clutch Hitter of the Year",
+    "Broken Glove Award",
+    "Whiff Award",
+    "Champion",
+]
 
 @bot.tree.command(name="give_award", description="[ADMIN] Give a league award to a player")
 @app_commands.describe(player="Player receiving the award", award="Award type")
@@ -1931,8 +1942,16 @@ async def give_award(interaction: discord.Interaction, player: discord.Member, a
     await db.execute("INSERT INTO awards (discord_id, award) VALUES (?,?)", (player.id, award))
     await db.commit()
     award_emojis = {
-        "MVP": "🏆", "Cy Young": "⚾", "Rookie of the Year": "🌟",
-        "Golden Glove": "🧤", "Silver Slugger": "🥈", "Manager of the Year": "👔", "Champion": "💍"
+        "MVP": "🏆",
+        "Cy Young Award": "⚾",
+        "Silver Slugger": "🥈",
+        "Batting Title": "🎯",
+        "Rookie of the Year": "🌟",
+        "Manager of the Year": "👔",
+        "Clutch Hitter of the Year": "💥",
+        "Broken Glove Award": "🧤",
+        "Whiff Award": "💨",
+        "Champion": "💍",
     }
     emoji = award_emojis.get(award, "🏅")
     e = discord.Embed(color=0xFFD700)
@@ -1962,8 +1981,10 @@ async def awards(interaction: discord.Interaction):
     if not rows:
         return await interaction.followup.send(embed=warn_embed("No Awards Yet"))
     award_emojis = {
-        "MVP": "🏆", "Cy Young": "⚾", "Rookie of the Year": "🌟",
-        "Golden Glove": "🧤", "Silver Slugger": "🥈", "Manager of the Year": "👔", "Champion": "💍"
+        "MVP": "🏆", "Cy Young Award": "⚾", "Silver Slugger": "🥈",
+        "Batting Title": "🎯", "Rookie of the Year": "🌟", "Manager of the Year": "👔",
+        "Clutch Hitter of the Year": "💥", "Broken Glove Award": "🧤",
+        "Whiff Award": "💨", "Champion": "💍",
     }
     e = discord.Embed(title="🏅  League Awards", color=0xFFD700)
     lines = [f"{award_emojis.get(award,'🏅')} **{award}** — <@{did}> _{season}_" for did, award, season in rows]
@@ -1988,7 +2009,7 @@ async def player_awards(interaction: discord.Interaction, player: discord.Member
     """)
     cur = await db.execute("SELECT award, season FROM awards WHERE discord_id=? ORDER BY given_at DESC", (target.id,))
     rows = await cur.fetchall()
-    award_emojis = {"MVP":"🏆","Cy Young":"⚾","Rookie of the Year":"🌟","Golden Glove":"🧤","Silver Slugger":"🥈","Manager of the Year":"👔","Champion":"💍"}
+    award_emojis = {"MVP":"🏆","Cy Young Award":"⚾","Silver Slugger":"🥈","Batting Title":"🎯","Rookie of the Year":"🌟","Manager of the Year":"👔","Clutch Hitter of the Year":"💥","Broken Glove Award":"🧤","Whiff Award":"💨","Champion":"💍"}
     e = discord.Embed(color=0xFFD700)
     e.set_author(name=f"{target.display_name}'s Awards", icon_url=target.display_avatar.url)
     e.set_thumbnail(url=target.display_avatar.url)
@@ -2188,6 +2209,30 @@ class FAPageView(discord.ui.View):
         self.prev_btn.disabled = self.index == 0
         self.next_btn.disabled = self.index == len(self.pages) - 1
         await interaction.response.edit_message(content=self.pages[self.index], view=self)
+
+
+@bot.tree.command(name="awards_announce", description="[ADMIN] Post the season awards announcement")
+@app_commands.describe(season="Season number e.g. 2")
+@app_commands.checks.has_permissions(administrator=True)
+async def awards_announce(interaction: discord.Interaction, season: int = 1):
+    await interaction.response.defer()
+    msg = f"""|| <@&1485364545710198874> ||
+
+# Awards for this Season {season}
+
+__**Awards**__
+- Most Valuable Player (MVP)
+- Cy Young Award
+- Silver Slugger Awards
+- Batting Title (Highest Batting Average)
+- Rookie of the Year
+- Manager of the Year
+
+__**Miscellaneous**__
+- Clutch Hitter of the Year (Given to the **Most Clutch Player** of the season | RISP + RBIs factored into decision making.)
+- Broken Glove Award (Most errors/Worst lowlight of the season)
+- Whiff Award (Most Batting Strikeouts)"""
+    await interaction.followup.send(msg)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
