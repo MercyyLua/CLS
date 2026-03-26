@@ -152,6 +152,14 @@ async def init_db():
             bullpen    TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS release_requests (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id  INTEGER REFERENCES players(id),
+            team_id    INTEGER REFERENCES teams(id),
+            reason     TEXT,
+            status     TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS suspensions (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             discord_id INTEGER NOT NULL,
@@ -321,7 +329,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ── TEAM COMMANDS ─────────────────────────────────────────────────
-@bot.tree.command(name="team_create", description="Create a new league team")
+@bot.tree.command(name="create_team", description="Create a new league team")
 @app_commands.describe(name="Full team name", abbreviation="3-4 letter abbreviation", logo_url="Optional logo URL")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def team_create(interaction: discord.Interaction, name: str, abbreviation: str, logo_url: str = None):
@@ -340,7 +348,7 @@ async def team_create(interaction: discord.Interaction, name: str, abbreviation:
     e.add_field(name="Owner", value=interaction.user.mention)
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="team_info", description="View a team's info and roster")
+@bot.tree.command(name="team", description="View a team's info and roster")
 @app_commands.describe(team="The team")
 async def team_info(interaction: discord.Interaction, team: discord.Role):
     await interaction.response.defer()
@@ -423,7 +431,7 @@ async def standings(interaction: discord.Interaction):
     e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Top 3 per division + 2 wild cards advance to playoffs")
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="team_delete", description="[ADMIN] Delete a team")
+@bot.tree.command(name="delete_team", description="[ADMIN] Delete a team")
 @app_commands.describe(team="The team role e.g. @Dallas Panthers")
 @app_commands.checks.has_permissions(administrator=True)
 async def team_delete(interaction: discord.Interaction, team: discord.Role):
@@ -806,7 +814,7 @@ async def report_game(interaction: discord.Interaction, home_team: discord.Role,
     e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="recent_games", description="View recent game results")
+@bot.tree.command(name="results", description="View recent game results")
 async def recent_games(interaction: discord.Interaction):
     await interaction.response.defer()
     db = await get_db()
@@ -835,7 +843,7 @@ async def recent_games(interaction: discord.Interaction):
     e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="upcoming_games", description="View upcoming scheduled games")
+@bot.tree.command(name="schedule", description="View upcoming scheduled games")
 async def upcoming_games(interaction: discord.Interaction):
     await interaction.response.defer()
     db = await get_db()
@@ -955,7 +963,7 @@ async def reset_season(interaction: discord.Interaction):
     else:
         await interaction.followup.send(embed=base_embed("Reset Cancelled."), ephemeral=True)
 
-@bot.tree.command(name="leaguehelp", description="Show all league bot commands")
+@bot.tree.command(name="help", description="Show all league bot commands")
 async def leaguehelp(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     e = base_embed("⚾ HCBB 9v9 2.0 — Command Guide")
@@ -1011,7 +1019,7 @@ async def remove_team_role(interaction: discord.Interaction, role: discord.Role)
     await db.commit()
     await interaction.followup.send(embed=success_embed("Role Removed", f"Role unlinked from **{row[1]}**."))
 
-@bot.tree.command(name="league_config", description="[ADMIN] View current bot config")
+@bot.tree.command(name="bot_config", description="[ADMIN] View current bot config")
 @app_commands.checks.has_permissions(administrator=True)
 async def league_config(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -1056,7 +1064,7 @@ async def abbreviations(interaction: discord.Interaction):
 
 
 
-@bot.tree.command(name="register_player", description="[ADMIN] Register a player on their behalf")
+@bot.tree.command(name="admin_register", description="[ADMIN] Register a player on their behalf")
 @app_commands.describe(player="The player to register", position="Their primary position")
 @app_commands.choices(position=[app_commands.Choice(name=p, value=p) for p in POSITIONS])
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -1073,7 +1081,7 @@ async def register_player(interaction: discord.Interaction, player: discord.Memb
     e.set_thumbnail(url=player.display_avatar.url)
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="register_all", description="[ADMIN] Register all members of the server as free agents")
+@bot.tree.command(name="bulk_register", description="[ADMIN] Register all members of the server as free agents")
 @app_commands.describe(position="Position to assign to everyone")
 @app_commands.choices(position=[app_commands.Choice(name=p, value=p) for p in POSITIONS])
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -1497,7 +1505,7 @@ async def suspensions(interaction: discord.Interaction):
     e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="force_sign", description="[ADMIN] Force sign a player to a team")
+@bot.tree.command(name="admin_sign", description="[ADMIN] Force sign a player to a team")
 @app_commands.describe(player="Player to sign", team="Team to sign them to")
 @app_commands.checks.has_permissions(administrator=True)
 async def force_sign(interaction: discord.Interaction, player: discord.Member, team: discord.Role):
@@ -1656,7 +1664,7 @@ async def gametime(interaction: discord.Interaction):
 
     await interaction.followup.send("\n".join(lines))
 
-@bot.tree.command(name="submit_player_stats", description="[MOD] Submit stats for multiple players at once after a game")
+@bot.tree.command(name="bulk_stats", description="[MOD] Submit stats for multiple players at once after a game")
 @app_commands.describe(
     game_info="Short description e.g. DAL vs STL Round 1"
 )
@@ -1869,7 +1877,7 @@ async def allstar_clear(interaction: discord.Interaction):
     await interaction.followup.send(embed=success_embed("All-Star Rosters Cleared"))
 
 # ── HR DERBY ──────────────────────────────────────────────────────
-@bot.tree.command(name="hrderbry_add", description="[ADMIN] Add a player to the HR Derby")
+@bot.tree.command(name="hrderby_add", description="[ADMIN] Add a player to the HR Derby")
 @app_commands.describe(player="Player to add to HR Derby")
 @app_commands.checks.has_permissions(administrator=True)
 async def hrderby_add(interaction: discord.Interaction, player: discord.Member):
@@ -1890,7 +1898,7 @@ async def hrderby_score(interaction: discord.Interaction, player: discord.Member
     await db.commit()
     await interaction.followup.send(embed=success_embed("Score Updated", f"{player.mention}: **{home_runs} HR**"))
 
-@bot.tree.command(name="hrderby_standings", description="View HR Derby leaderboard")
+@bot.tree.command(name="hrderby", description="View HR Derby leaderboard")
 async def hrderby_standings(interaction: discord.Interaction):
     await interaction.response.defer()
     db = await get_db()
@@ -1929,7 +1937,7 @@ AWARD_TYPES = [
     "Champion",
 ]
 
-@bot.tree.command(name="give_award", description="[ADMIN] Give a league award to a player")
+@bot.tree.command(name="award", description="[ADMIN] Give a league award to a player")
 @app_commands.describe(player="Player receiving the award", award="Award type")
 @app_commands.choices(award=[app_commands.Choice(name=a, value=a) for a in AWARD_TYPES])
 @app_commands.checks.has_permissions(administrator=True)
@@ -2081,7 +2089,7 @@ class PingRoleButton(discord.ui.Button):
                 ephemeral=True
             )
 
-@bot.tree.command(name="pingroles_panel", description="[ADMIN] Post the ping roles panel")
+@bot.tree.command(name="ping_panel", description="[ADMIN] Post the ping roles panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def pingroles_panel(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -2096,7 +2104,7 @@ async def pingroles_panel(interaction: discord.Interaction):
     await interaction.followup.send("\n".join(lines), view=PingRoleView())
 
 
-@bot.tree.command(name="force_release", description="[ADMIN] Force release a player from their team")
+@bot.tree.command(name="admin_release", description="[ADMIN] Force release a player from their team")
 @app_commands.describe(player="Player to release")
 @app_commands.checks.has_permissions(administrator=True)
 async def force_release(interaction: discord.Interaction, player: discord.Member):
@@ -2149,7 +2157,7 @@ async def force_release(interaction: discord.Interaction, player: discord.Member
     await post_transaction(interaction.guild, config, tx)
 
 
-@bot.tree.command(name="team_rename", description="[ADMIN] Rename a team")
+@bot.tree.command(name="rename_team", description="[ADMIN] Rename a team")
 @app_commands.describe(
     team="The team to rename",
     new_name="New full team name e.g. Brooklyn Bears",
@@ -2547,6 +2555,192 @@ async def offer(interaction: discord.Interaction, player: discord.Member, team: 
             embed=error_embed("Can't DM Player", f"{player.mention} has DMs disabled. They need to enable DMs from server members."),
             ephemeral=True
         )
+
+
+# ── RELEASE REQUEST SYSTEM ────────────────────────────────────────
+class ReleaseRequestView(discord.ui.View):
+    def __init__(self, player_id: int, team_id: int, request_id: int, player_name: str):
+        super().__init__(timeout=86400)
+        self.player_id   = player_id
+        self.team_id     = team_id
+        self.request_id  = request_id
+        self.player_name = player_name
+
+    @discord.ui.button(label="✅  Approve Release", style=discord.ButtonStyle.success)
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db = await get_db()
+        # Verify user is owner or manager
+        cur = await db.execute("SELECT id, name, owner_id FROM teams WHERE id=?", (self.team_id,))
+        team = await cur.fetchone()
+        if not team:
+            return await interaction.response.send_message("❌ Team not found.", ephemeral=True)
+        cur_mgr = await db.execute("SELECT 1 FROM team_managers WHERE team_id=? AND discord_id=?", (self.team_id, interaction.user.id))
+        is_mgr = await cur_mgr.fetchone() is not None
+        if team[2] != interaction.user.id and not is_mgr and not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You're not authorized to approve this.", ephemeral=True)
+
+        # Release the player
+        cur2 = await db.execute("SELECT id FROM players WHERE discord_id=?", (self.player_id,))
+        p = await cur2.fetchone()
+        if p:
+            await db.execute("UPDATE players SET team_id=NULL, free_agent=1 WHERE discord_id=?", (self.player_id,))
+            await db.execute("INSERT INTO transactions (player_id, from_team, type) VALUES (?,?,?)", (p[0], self.team_id, "RELEASE"))
+        await db.execute("UPDATE release_requests SET status='approved' WHERE id=?", (self.request_id,))
+        await db.commit()
+
+        # Remove team role, add FA role
+        guild = interaction.guild
+        member = guild.get_member(self.player_id)
+        if member:
+            await remove_team_role_fn(member, guild, self.team_id)
+            fa_role = guild.get_role(FA_ROLE_ID)
+            if fa_role and fa_role not in member.roles:
+                try: await member.add_roles(fa_role)
+                except: pass
+            # Notify player
+            try:
+                notif = discord.Embed(color=0x2ECC71)
+                notif.set_author(name="✅  Release Request Approved")
+                notif.description = f"Your release request from **{team[1]}** has been approved. You are now a Free Agent."
+                notif.set_footer(text="⚾ HCBB 9v9 2.0 League")
+                await member.send(embed=notif)
+            except: pass
+
+        config = await get_config(interaction.guild_id or 0)
+        tx = discord.Embed(color=0xFF6B35)
+        tx.set_author(name="🚪  Transaction Wire — RELEASED")
+        tx.description = f"<@{self.player_id}> released from **{team[1]}** (requested release)"
+        tx.add_field(name="👤 Player", value=f"<@{self.player_id}>", inline=True)
+        tx.add_field(name="📤 From",   value=f"**{team[1]}**", inline=True)
+        tx.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        await post_transaction(interaction.guild, config, tx)
+
+        e = discord.Embed(color=0x2ECC71)
+        e.set_author(name="✅  Release Approved")
+        e.description = f"**{self.player_name}** has been released and is now a Free Agent."
+        await interaction.response.edit_message(embed=e, view=None)
+        self.stop()
+
+    @discord.ui.button(label="❌  Deny", style=discord.ButtonStyle.danger)
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db = await get_db()
+        cur = await db.execute("SELECT id, name, owner_id FROM teams WHERE id=?", (self.team_id,))
+        team = await cur.fetchone()
+        if not team:
+            return await interaction.response.send_message("❌ Team not found.", ephemeral=True)
+        cur_mgr = await db.execute("SELECT 1 FROM team_managers WHERE team_id=? AND discord_id=?", (self.team_id, interaction.user.id))
+        is_mgr = await cur_mgr.fetchone() is not None
+        if team[2] != interaction.user.id and not is_mgr and not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You're not authorized.", ephemeral=True)
+
+        await db.execute("UPDATE release_requests SET status='denied' WHERE id=?", (self.request_id,))
+        await db.commit()
+
+        # Notify player
+        member = interaction.guild.get_member(self.player_id)
+        if member:
+            try:
+                notif = discord.Embed(color=0xFF4444)
+                notif.set_author(name="❌  Release Request Denied")
+                notif.description = f"Your release request from **{team[1]}** was denied."
+                notif.set_footer(text="⚾ HCBB 9v9 2.0 League")
+                await member.send(embed=notif)
+            except: pass
+
+        e = discord.Embed(color=0xFF4444)
+        e.set_author(name="❌  Release Request Denied")
+        e.description = f"**{self.player_name}**'s release request has been denied."
+        await interaction.response.edit_message(embed=e, view=None)
+        self.stop()
+
+@bot.tree.command(name="request_release", description="Request to be released from your current team")
+@app_commands.describe(reason="Why you want to be released (optional)")
+async def request_release(interaction: discord.Interaction, reason: str = "No reason provided"):
+    await interaction.response.defer(ephemeral=True)
+    db = await get_db()
+    cur = await db.execute("SELECT id, team_id, username FROM players WHERE discord_id=?", (interaction.user.id,))
+    p = await cur.fetchone()
+    if not p:
+        return await interaction.followup.send(embed=error_embed("Not Registered", "You aren't registered in the league."))
+    if not p[1]:
+        return await interaction.followup.send(embed=error_embed("Not On A Team", "You're already a free agent."))
+
+    # Check no pending request
+    cur2 = await db.execute("SELECT id FROM release_requests WHERE player_id=? AND status='pending'", (p[0],))
+    if await cur2.fetchone():
+        return await interaction.followup.send(embed=warn_embed("Already Requested", "You already have a pending release request."))
+
+    cur3 = await db.execute("SELECT id, name, owner_id FROM teams WHERE id=?", (p[1],))
+    team = await cur3.fetchone()
+    if not team:
+        return await interaction.followup.send(embed=error_embed("Team Not Found"))
+
+    cur4 = await db.execute("INSERT INTO release_requests (player_id, team_id, reason) VALUES (?,?,?)", (p[0], p[1], reason))
+    await db.commit()
+    req_id = cur4.lastrowid
+
+    # Send to team owner via DM
+    owner = interaction.client.get_user(team[2])
+    view = ReleaseRequestView(interaction.user.id, p[1], req_id, interaction.user.display_name)
+
+    req_embed = discord.Embed(color=0xF1C40F)
+    req_embed.set_author(name="📩  Release Request", icon_url=interaction.user.display_avatar.url)
+    req_embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    req_embed.description = f"**{interaction.user.display_name}** is requesting to be released from **{team[1]}**."
+    req_embed.add_field(name="👤 Player", value=f"{interaction.user.mention} `{interaction.user.display_name}`", inline=True)
+    req_embed.add_field(name="🏟️ Team",  value=f"**{team[1]}**", inline=True)
+    req_embed.add_field(name="📋 Reason", value=f">>> {reason}", inline=False)
+    req_embed.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Approve or deny below")
+
+    sent = False
+    if owner:
+        try:
+            await owner.send(embed=req_embed, view=view)
+            sent = True
+        except discord.Forbidden:
+            pass
+
+    if sent:
+        await interaction.followup.send(embed=success_embed("Request Sent!", f"Your release request has been sent to the owner of **{team[1]}**. You'll be notified when they respond."))
+    else:
+        await interaction.followup.send(embed=warn_embed("Request Logged", f"Your release request has been recorded but we couldn't DM the owner. Ask them to check `/release_requests`."))
+
+@bot.tree.command(name="release_requests", description="[GM] View pending release requests for your team")
+@app_commands.describe(team="Your team")
+async def release_requests_cmd(interaction: discord.Interaction, team: discord.Role):
+    await interaction.response.defer(ephemeral=True)
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Team Not Found"))
+    db = await get_db()
+    is_owner = row[3] == interaction.user.id
+    cur_mgr = await db.execute("SELECT 1 FROM team_managers WHERE team_id=? AND discord_id=?", (row[0], interaction.user.id))
+    is_mgr = await cur_mgr.fetchone() is not None
+    if not is_owner and not is_mgr and not interaction.user.guild_permissions.administrator:
+        return await interaction.followup.send(embed=error_embed("Not Authorized"))
+
+    cur = await db.execute("""
+        SELECT rr.id, p.discord_id, p.username, rr.reason, rr.created_at
+        FROM release_requests rr
+        JOIN players p ON p.id = rr.player_id
+        WHERE rr.team_id=? AND rr.status='pending'
+        ORDER BY rr.created_at DESC
+    """, (row[0],))
+    reqs = await cur.fetchall()
+
+    if not reqs:
+        return await interaction.followup.send(embed=success_embed("No Pending Requests", "No players have requested a release."))
+
+    e = discord.Embed(title=f"📩  Release Requests — {row[1]}", color=0xF1C40F)
+    for req_id, did, uname, reason, ts in reqs:
+        date = ts[:10] if ts else "?"
+        view = ReleaseRequestView(did, row[0], req_id, uname)
+        e.add_field(
+            name=f"{uname}  ·  {date}",
+            value=f"<@{did}>\n>>> {reason}",
+            inline=False
+        )
+    await interaction.followup.send(embed=e)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
