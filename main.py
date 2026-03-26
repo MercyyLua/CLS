@@ -2371,6 +2371,183 @@ async def hrderby_auto(interaction: discord.Interaction, top_n: int = 8):
     e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Use /hrderby_standings to view live leaderboard")
     await interaction.followup.send(embed=e)
 
+
+# ── OFFER SYSTEM ─────────────────────────────────────────────────
+class OfferView(discord.ui.View):
+    def __init__(self, player_id: int, team_id: int, team_name: str, team_role_id: int, owner_id: int):
+        super().__init__(timeout=86400)  # 24 hours
+        self.player_id   = player_id
+        self.team_id     = team_id
+        self.team_name   = team_name
+        self.team_role_id = team_role_id
+        self.owner_id    = owner_id
+
+    @discord.ui.button(label="✅  Accept", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.player_id:
+            return await interaction.response.send_message("❌ This offer isn't for you.", ephemeral=True)
+
+        db = await get_db()
+        # Check roster cap
+        cur = await db.execute("SELECT COUNT(*) FROM players WHERE team_id=?", (self.team_id,))
+        count = (await cur.fetchone())[0]
+        if count >= 20:
+            await interaction.response.edit_message(
+                content="❌ Offer expired — that team's roster is now full.",
+                embed=None, view=None
+            )
+            return
+
+        # Check still a free agent
+        cur2 = await db.execute("SELECT id, free_agent FROM players WHERE discord_id=?", (self.player_id,))
+        p = await cur2.fetchone()
+        if not p or not p[1]:
+            await interaction.response.edit_message(
+                content="❌ Offer expired — you're already on a team.",
+                embed=None, view=None
+            )
+            return
+
+        await db.execute("UPDATE players SET team_id=?, free_agent=0 WHERE discord_id=?", (self.team_id, self.player_id))
+        await db.execute("INSERT INTO transactions (player_id, to_team, type) VALUES (?,?,?)", (p[0], self.team_id, "SIGN"))
+        await db.commit()
+
+        # Roles
+        guild = interaction.guild
+        if guild:
+            member = guild.get_member(self.player_id)
+            if member:
+                team_role = guild.get_role(self.team_role_id)
+                fa_role   = guild.get_role(FA_ROLE_ID)
+                try:
+                    if team_role: await member.add_roles(team_role, reason="HCBB: Offer accepted")
+                    if fa_role and fa_role in member.roles: await member.remove_roles(fa_role)
+                except discord.Forbidden:
+                    pass
+
+        # Post to transactions channel
+        config = await get_config(interaction.guild_id or 0)
+        tx = discord.Embed(color=0x2ECC71)
+        tx.set_author(name="✍️  Transaction Wire — SIGNED")
+        tx.description = f"<@{self.player_id}> accepted an offer from **{self.team_name}**"
+        tx.add_field(name="👤 Player", value=f"<@{self.player_id}>", inline=True)
+        tx.add_field(name="🏟️ Team",  value=f"**{self.team_name}**", inline=True)
+        tx.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        if interaction.guild:
+            await post_transaction(interaction.guild, config, tx)
+
+        e = discord.Embed(color=0x2ECC71)
+        e.set_author(name="✅  Offer Accepted!")
+        e.description = f"You have joined **{self.team_name}**. Welcome to the squad!"
+        e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        await interaction.response.edit_message(embed=e, view=None)
+
+        # Notify owner
+        owner = interaction.client.get_user(self.owner_id)
+        if owner:
+            try:
+                notif = discord.Embed(color=0x2ECC71)
+                notif.set_author(name="✅  Offer Accepted!")
+                notif.description = f"<@{self.player_id}> accepted your offer to join **{self.team_name}**!"
+                notif.set_footer(text="⚾ HCBB 9v9 2.0 League")
+                await owner.send(embed=notif)
+            except discord.Forbidden:
+                pass
+
+        self.stop()
+
+    @discord.ui.button(label="❌  Decline", style=discord.ButtonStyle.danger)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.player_id:
+            return await interaction.response.send_message("❌ This offer isn't for you.", ephemeral=True)
+
+        e = discord.Embed(color=0xFF4444)
+        e.set_author(name="❌  Offer Declined")
+        e.description = f"You declined the offer from **{self.team_name}**."
+        e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        await interaction.response.edit_message(embed=e, view=None)
+
+        # Notify owner
+        owner = interaction.client.get_user(self.owner_id)
+        if owner:
+            try:
+                notif = discord.Embed(color=0xFF4444)
+                notif.set_author(name="❌  Offer Declined")
+                notif.description = f"<@{self.player_id}> declined your offer to join **{self.team_name}**."
+                notif.set_footer(text="⚾ HCBB 9v9 2.0 League")
+                await owner.send(embed=notif)
+            except discord.Forbidden:
+                pass
+
+        self.stop()
+
+@bot.tree.command(name="offer", description="Send a signing offer to a free agent via DM")
+@app_commands.describe(player="The player to offer", team="Your team")
+async def offer(interaction: discord.Interaction, player: discord.Member, team: discord.Role):
+    await interaction.response.defer(ephemeral=True)
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Team Not Found", f"{team.mention} isn't linked to a team."))
+
+    # Check user is owner or manager
+    db = await get_db()
+    is_owner = row[3] == interaction.user.id
+    cur_mgr = await db.execute("SELECT 1 FROM team_managers WHERE team_id=? AND discord_id=?", (row[0], interaction.user.id))
+    is_mgr = await cur_mgr.fetchone() is not None
+    if not is_owner and not is_mgr and not interaction.user.guild_permissions.administrator:
+        return await interaction.followup.send(embed=error_embed("Not Authorized", "Only the team owner or manager can send offers."))
+
+    # Check roster cap
+    cur2 = await db.execute("SELECT COUNT(*) FROM players WHERE team_id=?", (row[0],))
+    count = (await cur2.fetchone())[0]
+    if count >= 20:
+        return await interaction.followup.send(embed=error_embed("Roster Full", f"**{row[1]}** is at 20/20 players."))
+
+    # Check player is registered and a free agent
+    cur3 = await db.execute("SELECT id, free_agent FROM players WHERE discord_id=?", (player.id,))
+    p = await cur3.fetchone()
+    if not p:
+        return await interaction.followup.send(embed=error_embed("Not Registered", f"{player.mention} hasn't registered yet."))
+    if not p[1]:
+        return await interaction.followup.send(embed=error_embed("Not a Free Agent", f"{player.mention} is already on a team."))
+
+    # Get team role ID
+    cur4 = await db.execute("SELECT role_id FROM team_roles WHERE team_id=?", (row[0],))
+    role_row = await cur4.fetchone()
+    team_role_id = role_row[0] if role_row else 0
+
+    # Build the offer embed
+    offer_embed = discord.Embed(color=0x1E90FF)
+    offer_embed.set_author(name="📨  Offer Received", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+    offer_embed.description = (
+        f"You have been offered by **{row[1]}** to join their franchise, do you accept?"
+    )
+    offer_embed.add_field(name="🏟️ Team",  value=f"**{row[1]}**  {team.mention}", inline=False)
+    offer_embed.add_field(name="👤 GM",    value=f"{interaction.user.mention}  `{interaction.user.display_name}`", inline=False)
+    offer_embed.add_field(name="⏳ Expires", value="24 hours", inline=False)
+    offer_embed.set_thumbnail(url=interaction.guild.icon.url if interaction.guild.icon else discord.Embed.Empty)
+    offer_embed.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Accept or decline below")
+
+    view = OfferView(
+        player_id=player.id,
+        team_id=row[0],
+        team_name=row[1],
+        team_role_id=team_role_id,
+        owner_id=interaction.user.id
+    )
+
+    try:
+        await player.send(embed=offer_embed, view=view)
+        await interaction.followup.send(
+            embed=success_embed("Offer Sent!", f"📨 Your offer has been sent to {player.mention}'s DMs."),
+            ephemeral=True
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            embed=error_embed("Can't DM Player", f"{player.mention} has DMs disabled. They need to enable DMs from server members."),
+            ephemeral=True
+        )
+
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
     def __init__(self):
