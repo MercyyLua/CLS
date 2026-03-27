@@ -24,6 +24,7 @@ FA_ROLE_ID         = 1464129524210995325
 MANAGER_ROLE_ID    = 1484655385607540989
 SUSPENSION_ROLE_ID = 1484723857339453471
 SUSPENSION_CHANNEL = 1478093960621723730
+LFP_CHANNEL        = 1464144302409252875
 
 TEAM_DATA = [
     ("Iowa Dream",              "IOWA", 1478105341899051028),
@@ -536,23 +537,49 @@ async def sign(interaction: discord.Interaction, player: discord.Member, team: d
     await db.execute("INSERT INTO transactions (player_id, to_team, type) VALUES (?,?,?)", (p[0], row[0], "SIGN"))
     await db.commit()
     await add_team_role(player, interaction.guild, row[0])
+    # Remove FA role
+    fa_role = interaction.guild.get_role(FA_ROLE_ID)
+    if fa_role and fa_role in player.roles:
+        try:
+            await player.remove_roles(fa_role, reason="HCBB: Signed to team")
+        except discord.Forbidden:
+            pass
+
+    # Response embed
     e = discord.Embed(color=0x2ECC71)
-    e.set_author(name="Player Signed", icon_url="https://cdn.discordapp.com/emojis/1234567890.png")
+    e.set_author(name="✍️  Player Signed", icon_url=player.display_avatar.url)
     e.set_thumbnail(url=player.display_avatar.url)
-    e.add_field(name="Player", value=f"{player.mention}", inline=True)
-    e.add_field(name="Position", value=p[4], inline=True)
-    e.add_field(name="Team", value=team.mention, inline=True)
-    e.add_field(name="Roster", value=f"{count+1}/20", inline=True)
-    e.set_footer(text="⚾ HCBB 9v9 2.0 League • Transaction")
+    e.description = f"{player.mention} has been signed to {team.mention}"
+    e.add_field(name="👤 Player",   value=player.mention, inline=True)
+    e.add_field(name="🏷️ Position", value=p[4] or "N/A",  inline=True)
+    e.add_field(name="📋 Roster",   value=f"`{count+1}/20`", inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
+
+    # Transaction channel
     tx = discord.Embed(color=0x2ECC71)
-    tx.set_author(name="✍️  SIGNED")
+    tx.set_author(name="✍️  Transaction Wire — SIGNED", icon_url=player.display_avatar.url)
     tx.set_thumbnail(url=player.display_avatar.url)
-    tx.add_field(name="Player", value=f"{player.mention} `{player.display_name}`", inline=False)
-    tx.add_field(name="Team", value=team.mention, inline=True)
-    tx.add_field(name="Position", value=p[4], inline=True)
-    tx.set_footer(text="⚾ HCBB 9v9 2.0 League • Transaction Wire")
+    tx.description = f"**{player.display_name}** signed to **{row[1]}**"
+    tx.add_field(name="👤 Player",   value=player.mention, inline=True)
+    tx.add_field(name="🏟️ Team",    value=team.mention,    inline=True)
+    tx.add_field(name="🏷️ Position", value=p[4] or "N/A",  inline=True)
+    tx.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await post_transaction(interaction.guild, config, tx)
+
+    # DM the signed player
+    dm = discord.Embed(color=0x2ECC71)
+    dm.set_author(name="✍️  You've Been Signed!", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+    dm.set_thumbnail(url=interaction.guild.icon.url if interaction.guild.icon else discord.Embed.Empty)
+    dm.description = f"You have been signed to **{row[1]}** in the CLS League!"
+    dm.add_field(name="🏟️ Team",  value=f"**{row[1]}**", inline=True)
+    dm.add_field(name="👤 GM",    value=f"{interaction.user.mention} `{interaction.user.display_name}`", inline=True)
+    dm.add_field(name="🏷️ Position", value=p[4] or "N/A", inline=True)
+    dm.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Welcome to the team!")
+    try:
+        await player.send(embed=dm)
+    except discord.Forbidden:
+        pass
 
 @bot.tree.command(name="release", description="Release a player from your team")
 @app_commands.describe(player="Player to release", team="Your team")
@@ -2545,7 +2572,8 @@ async def offer(interaction: discord.Interaction, player: discord.Member, team: 
     )
 
     try:
-        await player.send(content=f"<@&{team_role_id}>" if team_role_id else None, embed=offer_embed, view=view)
+        msg_content = f"📨 New offer from **{row[1]}**!" if not team_role_id else f"📨 New offer from **{row[1]}**!\n<@&{team_role_id}>"
+        await player.send(content=msg_content, embed=offer_embed, view=view)
         await interaction.followup.send(
             embed=success_embed("Offer Sent!", f"📨 Your offer has been sent to {player.mention}'s DMs."),
             ephemeral=True
@@ -2741,6 +2769,60 @@ async def release_requests_cmd(interaction: discord.Interaction, team: discord.R
             inline=False
         )
     await interaction.followup.send(embed=e)
+
+
+@bot.tree.command(name="lfp", description="[GM] Post a Looking For Players announcement")
+@app_commands.describe(
+    team="Your team",
+    positions="Positions you're looking for e.g. SP, C, 1B",
+    tryout_link="Link to your tryout or application",
+    message="Optional extra message"
+)
+async def lfp(interaction: discord.Interaction, team: discord.Role, positions: str, tryout_link: str, message: str = None):
+    await interaction.response.defer()
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Team Not Found", f"{team.mention} isn't linked to a team."))
+
+    # Check user is owner or manager
+    db = await get_db()
+    is_owner = row[3] == interaction.user.id
+    cur_mgr = await db.execute("SELECT 1 FROM team_managers WHERE team_id=? AND discord_id=?", (row[0], interaction.user.id))
+    is_mgr = await cur_mgr.fetchone() is not None
+    if not is_owner and not is_mgr and not interaction.user.guild_permissions.administrator:
+        return await interaction.followup.send(embed=error_embed("Not Authorized", "Only team owners and managers can post LFP."))
+
+    # Get roster count
+    cur2 = await db.execute("SELECT COUNT(*) FROM players WHERE team_id=?", (row[0],))
+    roster_count = (await cur2.fetchone())[0]
+    spots = 20 - roster_count
+
+    team_emoji = TEAM_EMOJIS.get(row[2], "⚾")
+
+    # Build the LFP embed
+    e = discord.Embed(color=team.color.value if team.color.value else BRAND_COLOR)
+    e.set_author(name=f"🔎  Looking For Players — {row[1]}", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+    e.description = f"{team_emoji} **{row[1]}** is looking for new players to join their roster!"
+    e.add_field(name="🏷️ Positions Needed", value=f"`{positions}`", inline=True)
+    e.add_field(name="📋 Roster Spots",     value=f"`{spots}/20 open`", inline=True)
+    e.add_field(name="🗺️ Conference",        value=f"{'🌅 Western' if row[2] in WESTERN else '🌆 Eastern'}", inline=True)
+    e.add_field(name="🔗 Tryout / Apply",   value=f"[Click Here]({tryout_link})", inline=False)
+    if message:
+        e.add_field(name="📝 Message from GM", value=f">>> {message}", inline=False)
+    e.add_field(name="👤 GM",               value=f"{interaction.user.mention} `{interaction.user.display_name}`", inline=False)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  React if interested!")
+
+    # Post to LFP channel with FA role ping
+    lfp_channel = interaction.guild.get_channel(LFP_CHANNEL)
+    fa_role = interaction.guild.get_role(FA_ROLE_ID)
+    ping = fa_role.mention if fa_role else ""
+
+    if lfp_channel:
+        await lfp_channel.send(content=ping, embed=e)
+        await interaction.followup.send(embed=success_embed("LFP Posted!", f"Your announcement has been posted in {lfp_channel.mention}."), ephemeral=True)
+    else:
+        await interaction.followup.send(embed=e)
+        await interaction.followup.send(embed=warn_embed("Channel Not Found", "Couldn't find the LFP channel. Posted here instead."), ephemeral=True)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
