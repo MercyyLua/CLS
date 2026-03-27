@@ -2530,7 +2530,8 @@ async def offer(interaction: discord.Interaction, player: discord.Member, team: 
     offer_embed.description = (
         f"You have been offered by **{row[1]}** to join their franchise, do you accept?"
     )
-    offer_embed.add_field(name="🏟️ Team",  value=f"**{row[1]}**  {team.mention}", inline=False)
+    role_mention = f"<@&{team_role_id}>" if team_role_id else row[1]
+    offer_embed.add_field(name="🏟️ Team",  value=f"**{row[1]}**  {role_mention}", inline=False)
     offer_embed.add_field(name="👤 GM",    value=f"{interaction.user.mention}  `{interaction.user.display_name}`", inline=False)
     offer_embed.add_field(name="⏳ Expires", value="24 hours", inline=False)
     offer_embed.set_thumbnail(url=interaction.guild.icon.url if interaction.guild.icon else discord.Embed.Empty)
