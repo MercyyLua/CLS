@@ -277,7 +277,10 @@ async def post_transaction(guild, config, embed):
     channel = guild.get_channel(ch_id)
     if channel:
         try:
-            await channel.send(embed=embed)
+            await channel.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(roles=True, users=True)
+            )
         except discord.Forbidden:
             pass
 
@@ -327,7 +330,11 @@ async def get_team_by_role(role: discord.Role):
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+    allowed_mentions=discord.AllowedMentions(roles=True, users=True, everyone=False)
+)
 
 # ── TEAM COMMANDS ─────────────────────────────────────────────────
 @bot.tree.command(name="create_team", description="Create a new league team")
@@ -1413,7 +1420,10 @@ async def auto_schedule(interaction: discord.Interaction, round_num: int, date: 
     lines.append("# *PMs can reschedule if a mutual agreement is reached if not the original time will be played*")
     lines.append("# *one person from each game must screenshot all stats and the score of each game in my DMs*")
 
-    await interaction.followup.send("\n".join(lines))
+    await interaction.followup.send(
+        "\n".join(lines),
+        allowed_mentions=discord.AllowedMentions(everyone=True, roles=True)
+    )
 
 
 @bot.tree.command(name="suspend", description="[ADMIN] Suspend a player")
@@ -1503,7 +1513,7 @@ async def unsuspend(interaction: discord.Interaction, player: discord.Member):
         announcement.description = f"{player.mention}'s suspension has been lifted. They are eligible to play."
         announcement.add_field(name="🔓 Reinstated By", value=interaction.user.mention, inline=True)
         announcement.set_footer(text="⚾ HCBB 9v9 2.0 League")
-        await susp_channel.send(embed=announcement)
+        await susp_channel.send(embed=announcement, allowed_mentions=discord.AllowedMentions(roles=True))
 
     e = discord.Embed(color=0x2ECC71)
     e.set_author(name="✅  Suspension Lifted", icon_url=player.display_avatar.url)
@@ -1689,7 +1699,10 @@ async def gametime(interaction: discord.Interaction):
     lines.append("*📌 PMs can reschedule with mutual agreement — original time stands otherwise*")
     lines.append("*📸 One player per game must screenshot stats & score and DM the commissioner*")
 
-    await interaction.followup.send("\n".join(lines))
+    await interaction.followup.send(
+        "\n".join(lines),
+        allowed_mentions=discord.AllowedMentions(everyone=True, roles=True)
+    )
 
 @bot.tree.command(name="bulk_stats", description="[MOD] Submit stats for multiple players at once after a game")
 @app_commands.describe(
@@ -2572,8 +2585,15 @@ async def offer(interaction: discord.Interaction, player: discord.Member, team: 
     )
 
     try:
-        msg_content = f"📨 New offer from **{row[1]}**!" if not team_role_id else f"📨 New offer from **{row[1]}**!\n<@&{team_role_id}>"
-        await player.send(content=msg_content, embed=offer_embed, view=view)
+        msg_content = f"📨 New offer from **{row[1]}**!"
+        if team_role_id:
+            msg_content += f"\n<@&{team_role_id}>"
+        await player.send(
+            content=msg_content,
+            embed=offer_embed,
+            view=view,
+            allowed_mentions=discord.AllowedMentions(roles=True)
+        )
         await interaction.followup.send(
             embed=success_embed("Offer Sent!", f"📨 Your offer has been sent to {player.mention}'s DMs."),
             ephemeral=True
@@ -2818,7 +2838,11 @@ async def lfp(interaction: discord.Interaction, team: discord.Role, positions: s
     ping = fa_role.mention if fa_role else ""
 
     if lfp_channel:
-        await lfp_channel.send(content=ping, embed=e)
+        await lfp_channel.send(
+            content=ping,
+            embed=e,
+            allowed_mentions=discord.AllowedMentions(roles=True)
+        )
         await interaction.followup.send(embed=success_embed("LFP Posted!", f"Your announcement has been posted in {lfp_channel.mention}."), ephemeral=True)
     else:
         await interaction.followup.send(embed=e)
