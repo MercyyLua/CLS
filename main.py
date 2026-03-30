@@ -36,12 +36,11 @@ TEAM_DATA = [
     ("Arizona Firebirds",       "ARI",  1482435095938732042),
     ("Houston Bulls",           "HOU",  1482465219103166484),
     ("San Diego Tropics",       "SDT",  1483156220369047615),
-    ("Dallas Panthers",         "DAL",  1483306097535225956),
     ("Miami Sharks",            "MIA",  1483695684199645256),
     ("San Francisco JailBirds", "SFJ",  1481718381760479446),
 ]
 
-WESTERN = ["SEA","ARI","SFJ","SDT","DAL","LAR"]
+WESTERN = ["SEA","ARI","SFJ","SDT","LAR"]
 EASTERN = ["IOWA","STL","PHI","MIA","CHI","HOU"]
 
 DIVISION_EMOJIS = {
@@ -51,7 +50,6 @@ DIVISION_EMOJIS = {
 
 # Team emoji map
 TEAM_EMOJIS = {
-    "DAL":  "<:panthers:1483185226174697555>",
     "STL":  "<:StLouisArchers:1478098322244768066>",
     "SEA":  "<:SeattleSonics:1478098221560762468>",
     "LAR":  "<:reapers:1482244326699565058>",
@@ -180,15 +178,16 @@ async def init_db():
     except:
         pass
 
-    # Remove Baltimore Ospreys if exists
-    cur_bal = await db.execute("SELECT id FROM teams WHERE abbreviation='BAL'")
-    bal = await cur_bal.fetchone()
-    if bal:
-        await db.execute("UPDATE players SET team_id=NULL, free_agent=1 WHERE team_id=?", (bal[0],))
-        await db.execute("DELETE FROM team_roles WHERE team_id=?", (bal[0],))
-        await db.execute("DELETE FROM teams WHERE id=?", (bal[0],))
-        await db.commit()
-        print("  🗑️ Removed Baltimore Ospreys")
+    # Remove Baltimore Ospreys and Dallas Panthers if they exist
+    for abbr_to_remove in ("BAL", "DAL"):
+        cur_rem = await db.execute("SELECT id FROM teams WHERE abbreviation=?", (abbr_to_remove,))
+        rem = await cur_rem.fetchone()
+        if rem:
+            await db.execute("UPDATE players SET team_id=NULL, free_agent=1 WHERE team_id=?", (rem[0],))
+            await db.execute("DELETE FROM team_roles WHERE team_id=?", (rem[0],))
+            await db.execute("DELETE FROM teams WHERE id=?", (rem[0],))
+            await db.commit()
+            print(f"  🗑️ Removed team [{abbr_to_remove}]")
 
     # Seed teams and link roles
     for name, abbr, role_id in TEAM_DATA:
@@ -2847,6 +2846,80 @@ async def lfp(interaction: discord.Interaction, team: discord.Role, positions: s
     else:
         await interaction.followup.send(embed=e)
         await interaction.followup.send(embed=warn_embed("Channel Not Found", "Couldn't find the LFP channel. Posted here instead."), ephemeral=True)
+
+
+# ── ROSTER VIEW ──────────────────────────────────────────────────
+class RosterView(discord.ui.View):
+    def __init__(self, team_id: int, team_name: str, team_color: int):
+        super().__init__(timeout=120)
+        self.team_id   = team_id
+        self.team_name = team_name
+        self.team_color = team_color
+
+    @discord.ui.button(label="Discord Mentions", style=discord.ButtonStyle.primary, emoji="👤")
+    async def show_mentions(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT discord_id, position FROM players WHERE team_id=? ORDER BY position",
+            (self.team_id,)
+        )
+        roster = await cur.fetchall()
+        if not roster:
+            return await interaction.response.send_message("_No players on this roster yet._", ephemeral=True)
+        lines = [f"{POSITION_EMOJIS.get(pos, '⚾')} <@{did}> — `{pos}`" for did, pos in roster]
+        e = discord.Embed(
+            title=f"👥  {self.team_name} — Roster ({len(roster)}/20)",
+            description="\n".join(lines),
+            color=self.team_color
+        )
+        e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        await interaction.response.send_message(
+            embed=e,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions(users=True)
+        )
+
+    @discord.ui.button(label="Roblox Names", style=discord.ButtonStyle.secondary, emoji="🎮")
+    async def show_rblx(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT username, rblx_username, position FROM players WHERE team_id=? ORDER BY position",
+            (self.team_id,)
+        )
+        roster = await cur.fetchall()
+        if not roster:
+            return await interaction.response.send_message("_No players on this roster yet._", ephemeral=True)
+        lines = []
+        for username, rblx, pos in roster:
+            emoji = POSITION_EMOJIS.get(pos, "⚾")
+            rblx_str = f"`{rblx}`" if rblx else "_No Roblox name_"
+            lines.append(f"{emoji} **{username}** — {rblx_str} · `{pos}`")
+        e = discord.Embed(
+            title=f"🎮  {self.team_name} — Roster ({len(roster)}/20)",
+            description="\n".join(lines),
+            color=self.team_color
+        )
+        e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+    @discord.ui.button(label="Full Names", style=discord.ButtonStyle.secondary, emoji="📋")
+    async def show_names(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT username, position FROM players WHERE team_id=? ORDER BY position",
+            (self.team_id,)
+        )
+        roster = await cur.fetchall()
+        if not roster:
+            return await interaction.response.send_message("_No players on this roster yet._", ephemeral=True)
+        lines = [f"{POSITION_EMOJIS.get(pos, '⚾')} **{u}** — `{pos}`" for u, pos in roster]
+        e = discord.Embed(
+            title=f"📋  {self.team_name} — Roster ({len(roster)}/20)",
+            description="\n".join(lines),
+            color=self.team_color
+        )
+        e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        await interaction.response.send_message(embed=e, ephemeral=True)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
