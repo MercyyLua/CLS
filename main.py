@@ -145,6 +145,11 @@ async def init_db():
             discord_id INTEGER NOT NULL,
             PRIMARY KEY (team_id, discord_id)
         );
+        CREATE TABLE IF NOT EXISTS asst_managers (
+            team_id    INTEGER REFERENCES teams(id),
+            discord_id INTEGER NOT NULL,
+            PRIMARY KEY (team_id, discord_id)
+        );
         CREATE TABLE IF NOT EXISTS lineups (
             team_id    INTEGER PRIMARY KEY REFERENCES teams(id),
             lineup     TEXT,
@@ -1232,30 +1237,26 @@ async def managers(interaction: discord.Interaction):
             PRIMARY KEY (team_id, discord_id)
         )
     """)
+    from collections import defaultdict
     cur = await db.execute("""
-        SELECT t.name, tm.discord_id
-        FROM team_managers tm
-        JOIN teams t ON t.id = tm.team_id
-        ORDER BY t.name
+        SELECT t.name, tm.discord_id, 'Manager' as role
+        FROM team_managers tm JOIN teams t ON t.id = tm.team_id
+        UNION ALL
+        SELECT t.name, am.discord_id, 'Asst Manager' as role
+        FROM asst_managers am JOIN teams t ON t.id = am.team_id
+        ORDER BY 1
     """)
     rows = await cur.fetchall()
     if not rows:
-        return await interaction.followup.send(embed=warn_embed("No Managers", "No managers have been appointed yet."))
-    e = discord.Embed(title="👔  Team Managers", color=0xF1C40F)
-    current_team = None
-    lines = []
-    team_lines = []
-    for team_name, discord_id in rows:
-        if team_name != current_team:
-            if current_team and team_lines:
-                lines.append(f"**{current_team}**\n" + "\n".join(team_lines))
-            current_team = team_name
-            team_lines = []
-        team_lines.append(f"└ <@{discord_id}>")
-    if current_team and team_lines:
-        lines.append(f"**{current_team}**\n" + "\n".join(team_lines))
-    e.description = "\n\n".join(lines)
-    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        return await interaction.followup.send(embed=warn_embed("No Staff", "No managers appointed yet."))
+    e = discord.Embed(title="👔  Team Staff", color=0xF1C40F)
+    teams_staff = defaultdict(list)
+    for team_name, discord_id, role in rows:
+        emoji = "👔" if role == "Manager" else "📋"
+        teams_staff[team_name].append(f"{emoji} <@{discord_id}> — *{role}*")
+    for team_name, staff_lines in teams_staff.items():
+        e.add_field(name=team_name, value="\n".join(staff_lines), inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  👔 Manager  📋 Asst Manager")
     await interaction.followup.send(embed=e)
 
 
@@ -2920,6 +2921,61 @@ class RosterView(discord.ui.View):
         )
         e.set_footer(text="⚾ HCBB 9v9 2.0 League")
         await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+@bot.tree.command(name="set_asst_manager", description="[OWNER] Appoint an assistant manager for your team")
+@app_commands.describe(team="Your team", asst_manager="The player to appoint")
+async def set_asst_manager(interaction: discord.Interaction, team: discord.Role, asst_manager: discord.Member):
+    await interaction.response.defer()
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Team Not Found"))
+    if row[3] != interaction.user.id and not interaction.user.guild_permissions.administrator:
+        return await interaction.followup.send(embed=error_embed("Not Authorized", "Only the team owner can appoint an assistant manager."))
+    asst_role = interaction.guild.get_role(ASST_MANAGER_ROLE_ID)
+    if asst_role:
+        try:
+            await asst_manager.add_roles(asst_role, reason=f"HCBB: Asst Manager of {row[1]}")
+        except discord.Forbidden:
+            return await interaction.followup.send(embed=error_embed("Permission Error", "Bot can't assign the role — make sure bot role is above it."))
+    db = await get_db()
+    await db.execute("INSERT OR IGNORE INTO asst_managers (team_id, discord_id) VALUES (?,?)", (row[0], asst_manager.id))
+    await db.commit()
+    e = discord.Embed(color=0x3498DB)
+    e.set_author(name="📋  Assistant Manager Appointed", icon_url=asst_manager.display_avatar.url)
+    e.set_thumbnail(url=asst_manager.display_avatar.url)
+    e.add_field(name="Asst Manager", value=asst_manager.mention, inline=True)
+    e.add_field(name="Team", value=team.mention, inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="remove_asst_manager", description="[OWNER] Remove an assistant manager from your team")
+@app_commands.describe(team="Your team", asst_manager="The assistant manager to remove")
+async def remove_asst_manager(interaction: discord.Interaction, team: discord.Role, asst_manager: discord.Member):
+    await interaction.response.defer()
+    row = await get_team_by_role(team)
+    if not row:
+        return await interaction.followup.send(embed=error_embed("Team Not Found"))
+    if row[3] != interaction.user.id and not interaction.user.guild_permissions.administrator:
+        return await interaction.followup.send(embed=error_embed("Not Authorized", "Only the team owner can remove an assistant manager."))
+    db = await get_db()
+    await db.execute("DELETE FROM asst_managers WHERE team_id=? AND discord_id=?", (row[0], asst_manager.id))
+    await db.commit()
+    cur = await db.execute("SELECT COUNT(*) FROM asst_managers WHERE discord_id=?", (asst_manager.id,))
+    count = (await cur.fetchone())[0]
+    if count == 0:
+        asst_role = interaction.guild.get_role(ASST_MANAGER_ROLE_ID)
+        if asst_role and asst_role in asst_manager.roles:
+            try:
+                await asst_manager.remove_roles(asst_role, reason="HCBB: Asst manager removed")
+            except discord.Forbidden:
+                pass
+    e = discord.Embed(color=0xFF6B35)
+    e.set_author(name="📋  Assistant Manager Removed", icon_url=asst_manager.display_avatar.url)
+    e.add_field(name="Asst Manager", value=asst_manager.mention, inline=True)
+    e.add_field(name="Team", value=team.mention, inline=True)
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+    await interaction.followup.send(embed=e)
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
