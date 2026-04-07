@@ -36,12 +36,12 @@ TEAM_DATA = [
     ("Arizona Firebirds",       "ARI",  1482435095938732042),
     ("Houston Bulls",           "HOU",  1482465219103166484),
     ("San Diego Tropics",       "SDT",  1483156220369047615),
-    ("Miami Sharks",            "MIA",  1483695684199645256),
+    ("Pittsburgh Stallions",    "PIT",  1483695684199645256),
     ("San Francisco JailBirds", "SFJ",  1481718381760479446),
 ]
 
 WESTERN = ["SEA","ARI","SFJ","SDT","LAR"]
-EASTERN = ["IOWA","STL","PHI","MIA","CHI","HOU"]
+EASTERN = ["IOWA","STL","PHI","PIT","CHI","HOU"]
 
 DIVISION_EMOJIS = {
     "WESTERN": "🌅",
@@ -58,7 +58,7 @@ TEAM_EMOJIS = {
     "ARI":  "<:ArizonaFirebirds:1478097743128956998>",
     "IOWA": "<:IowaDream:1478098067818545244>",
     "HOU":  "<:HoustonBulls:1478100936692994089>",
-    "MIA":  "<:MiamiSharks:1478099812875243686>",
+    "PIT":  "<:MiamiSharks:1478099812875243686>",
     "SFJ":  "<:SanFranciscoJailBirds:1478099356048429099>",
     "CHI":  "<:ChicagoRavens:1478100433456336938>",
 }
@@ -69,7 +69,7 @@ WEEK1_SCHEDULE = [
     ("SEA",  "LAR",  "LS2 — Monday March 30th 8PM EST"),
     ("SDT",  "PHI",  "LS3 — Monday March 30th 8PM EST"),
     ("ARI",  "IOWA", "LS4 — Monday March 30th 9PM EST"),
-    ("HOU",  "MIA",  "LS5 — Monday March 30th 9PM EST"),
+    ("HOU",  "PIT",  "LS5 — Monday March 30th 9PM EST"),
     ("SFJ",  "CHI",  "LS6 — Monday March 30th 9PM EST"),
 ]
 
@@ -184,6 +184,10 @@ async def init_db():
         pass
 
     # Remove Baltimore Ospreys and Dallas Panthers if they exist
+    # Rename Miami Sharks to Pittsburgh Stallions if exists
+    await db.execute("UPDATE teams SET name='Pittsburgh Stallions', abbreviation='PIT' WHERE abbreviation='MIA'")
+    await db.commit()
+
     for abbr_to_remove in ("BAL", "DAL"):
         cur_rem = await db.execute("SELECT id FROM teams WHERE abbreviation=?", (abbr_to_remove,))
         rem = await cur_rem.fetchone()
