@@ -1563,28 +1563,21 @@ async def force_sign(interaction: discord.Interaction, player: discord.Member, t
     cur2 = await db.execute("SELECT id, free_agent, team_id FROM players WHERE discord_id=?", (player.id,))
     p = await cur2.fetchone()
     if not p:
-        await db.execute("INSERT INTO players (discord_id, username, position) VALUES (?,?,?)",
-                         (player.id, player.display_name, "N/A"))
+        await db.execute("INSERT INTO players (discord_id, username, position, rblx_username) VALUES (?,?,?,?)",
+                         (player.id, player.display_name, "N/A", None))
         await db.commit()
         cur2 = await db.execute("SELECT id, free_agent, team_id FROM players WHERE discord_id=?", (player.id,))
         p = await cur2.fetchone()
 
-    # Release from current team if on one
+    # Remove from old team if on one
     if p[2]:
-        cur_old = await db.execute("SELECT id FROM team_roles WHERE team_id=?", (p[2],))
-        old_role_row = await cur_old.fetchone()
-        if old_role_row:
-            old_role = interaction.guild.get_role(old_role_row[0])
-            if old_role and old_role in player.roles:
-                try:
-                    await player.remove_roles(old_role, reason="HCBB: Force signed to new team")
-                except discord.Forbidden:
-                    pass
+        await remove_team_role_fn(player, interaction.guild, p[2])
 
     await db.execute("UPDATE players SET team_id=?, free_agent=0 WHERE discord_id=?", (row[0], player.id))
     await db.execute("INSERT INTO transactions (player_id, to_team, type) VALUES (?,?,?)", (p[0], row[0], "SIGN"))
     await db.commit()
 
+    # Add new team role, remove FA role
     await add_team_role(player, interaction.guild, row[0])
     fa_role = interaction.guild.get_role(FA_ROLE_ID)
     if fa_role and fa_role in player.roles:
@@ -1594,24 +1587,35 @@ async def force_sign(interaction: discord.Interaction, player: discord.Member, t
             pass
 
     e = discord.Embed(color=0xE74C3C)
-    e.set_author(name="⚡  Force Signed", icon_url=player.display_avatar.url)
+    e.set_author(name="⚡  Admin Sign", icon_url=player.display_avatar.url)
     e.set_thumbnail(url=player.display_avatar.url)
-    e.description = f"**{player.display_name}** has been force signed to {team.mention}"
-    e.add_field(name="👤 Player", value=player.mention, inline=True)
-    e.add_field(name="🏟️ Team", value=team.mention, inline=True)
-    e.add_field(name="📋 Roster", value=f"`{count+1}/20`", inline=True)
-    e.add_field(name="🔨 Signed By", value=interaction.user.mention, inline=True)
+    e.description = f"**{player.display_name}** has been signed to {team.mention}"
+    e.add_field(name="👤 Player",   value=player.mention, inline=True)
+    e.add_field(name="🏟️ Team",    value=team.mention,    inline=True)
+    e.add_field(name="📋 Roster",  value=f"`{count+1}/20`", inline=True)
+    e.add_field(name="🔨 By",      value=interaction.user.mention, inline=True)
     e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
     tx = discord.Embed(color=0xE74C3C)
-    tx.set_author(name="⚡  Transaction Wire — FORCE SIGNED", icon_url=player.display_avatar.url)
+    tx.set_author(name="⚡  Transaction Wire — ADMIN SIGN", icon_url=player.display_avatar.url)
     tx.set_thumbnail(url=player.display_avatar.url)
-    tx.description = f"**{player.display_name}** force signed to {team.mention}"
+    tx.description = f"**{player.display_name}** signed to {team.mention} by {interaction.user.mention}"
     tx.add_field(name="👤 Player", value=player.mention, inline=True)
-    tx.add_field(name="🏟️ Team", value=team.mention, inline=True)
+    tx.add_field(name="🏟️ Team",  value=team.mention,   inline=True)
     tx.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await post_transaction(interaction.guild, config, tx)
+
+    # DM the player
+    try:
+        dm = discord.Embed(color=0xE74C3C)
+        dm.set_author(name="⚡  You've Been Signed!", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+        dm.description = f"You have been signed to **{row[1]}** by an admin."
+        dm.add_field(name="🏟️ Team", value=f"**{row[1]}**", inline=True)
+        dm.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        await player.send(embed=dm)
+    except discord.Forbidden:
+        pass
 
 
 @bot.tree.command(name="clear_schedule", description="[ADMIN] Remove all upcoming scheduled games")
@@ -2923,7 +2927,7 @@ class RosterView(discord.ui.View):
         await interaction.response.send_message(embed=e, ephemeral=True)
 
 
-@bot.tree.command(name="set_asst_manager", description="[OWNER] Appoint an assistant manager for your team")
+@bot.tree.command(name="setam", description="[OWNER] Appoint an assistant manager for your team")
 @app_commands.describe(team="Your team", asst_manager="The player to appoint")
 async def set_asst_manager(interaction: discord.Interaction, team: discord.Role, asst_manager: discord.Member):
     await interaction.response.defer()
