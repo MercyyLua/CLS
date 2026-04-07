@@ -24,6 +24,7 @@ FA_ROLE_ID         = 1464129524210995325
 MANAGER_ROLE_ID    = 1484655385607540989
 SUSPENSION_ROLE_ID = 1484723857339453471
 SUSPENSION_CHANNEL = 1478093960621723730
+APPROVAL_CHANNEL   = 1491000741911855205
 LFP_CHANNEL        = 1464144302409252875
 
 TEAM_DATA = [
@@ -155,6 +156,15 @@ async def init_db():
             lineup     TEXT,
             bullpen    TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS sign_requests (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id  INTEGER NOT NULL,
+            team_id    INTEGER REFERENCES teams(id),
+            team_name  TEXT NOT NULL,
+            gm_id      INTEGER NOT NULL,
+            status     TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS release_requests (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -524,77 +534,85 @@ async def register(interaction: discord.Interaction, position: str, rblx_usernam
     e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
 
-@bot.tree.command(name="sign", description="Sign a free agent to your team")
+@bot.tree.command(name="sign", description="Submit a signing request for board approval")
 @app_commands.describe(player="Player to sign", team="Your team")
 async def sign(interaction: discord.Interaction, player: discord.Member, team: discord.Role):
     await interaction.response.defer()
-    config = await get_config(interaction.guild.id)
     row = await get_team_by_role(team)
     if not row:
         return await interaction.followup.send(embed=error_embed("Team Not Found", f"{team.mention} isn't linked to a team."))
-    if row[3] != interaction.user.id:
-        return await interaction.followup.send(embed=error_embed("Not Authorized", "You must be the franchise owner to sign players."))
+
+    # Check user is owner or manager
     db = await get_db()
-    # Check roster size
+    is_owner = row[3] == interaction.user.id
+    cur_mgr = await db.execute("SELECT 1 FROM team_managers WHERE team_id=? AND discord_id=?", (row[0], interaction.user.id))
+    is_mgr = await cur_mgr.fetchone() is not None
+    cur_asst = await db.execute("SELECT 1 FROM asst_managers WHERE team_id=? AND discord_id=?", (row[0], interaction.user.id))
+    is_asst = await cur_asst.fetchone() is not None
+    if not any([is_owner, is_mgr, is_asst, interaction.user.guild_permissions.administrator]):
+        return await interaction.followup.send(embed=error_embed("Not Authorized", "You must be an owner, manager, or assistant manager of this team."))
+
+    # Roster cap
     cur_count = await db.execute("SELECT COUNT(*) FROM players WHERE team_id=?", (row[0],))
     count = (await cur_count.fetchone())[0]
     if count >= 20:
-        return await interaction.followup.send(embed=error_embed("Roster Full", f"**{row[1]}** already has **{count}/20** players. Release someone first."))
+        return await interaction.followup.send(embed=error_embed("Roster Full", f"**{row[1]}** is at 20/20 players."))
+
+    # Player checks
     cur2 = await db.execute("SELECT id, username, free_agent, team_id, position FROM players WHERE discord_id=?", (player.id,))
     p = await cur2.fetchone()
     if not p:
-        return await interaction.followup.send(embed=error_embed("Not Registered", f"{player.mention} hasn't registered yet. They need to use `/register` first."))
+        return await interaction.followup.send(embed=error_embed("Not Registered", f"{player.mention} hasn't registered yet."))
     if not p[2]:
         cur3 = await db.execute("SELECT name FROM teams WHERE id=?", (p[3],))
         ct = await cur3.fetchone()
-        return await interaction.followup.send(embed=error_embed("Not a Free Agent", f"{player.mention} is already on **{ct[0] if ct else 'a team'}**. They must be released first."))
-    await db.execute("UPDATE players SET team_id=?, free_agent=0 WHERE discord_id=?", (row[0], player.id))
-    await db.execute("INSERT INTO transactions (player_id, to_team, type) VALUES (?,?,?)", (p[0], row[0], "SIGN"))
+        return await interaction.followup.send(embed=error_embed("Not a Free Agent", f"{player.mention} is already on **{ct[0] if ct else 'a team'}**."))
+
+    # Check no pending request for this player
+    cur_dup = await db.execute("SELECT id FROM sign_requests WHERE player_id=? AND status='pending'", (player.id,))
+    if await cur_dup.fetchone():
+        return await interaction.followup.send(embed=warn_embed("Already Pending", f"There's already a pending signing request for {player.mention}."))
+
+    # Log the request
+    cur_req = await db.execute(
+        "INSERT INTO sign_requests (player_id, team_id, team_name, gm_id) VALUES (?,?,?,?)",
+        (player.id, row[0], row[1], interaction.user.id)
+    )
     await db.commit()
-    await add_team_role(player, interaction.guild, row[0])
-    # Remove FA role
-    fa_role = interaction.guild.get_role(FA_ROLE_ID)
-    if fa_role and fa_role in player.roles:
-        try:
-            await player.remove_roles(fa_role, reason="HCBB: Signed to team")
-        except discord.Forbidden:
-            pass
+    req_id = cur_req.lastrowid
 
-    # Response embed
-    e = discord.Embed(color=0x2ECC71)
-    e.set_author(name="✍️  Player Signed", icon_url=player.display_avatar.url)
-    e.set_thumbnail(url=player.display_avatar.url)
-    e.description = f"{player.mention} has been signed to {team.mention}"
-    e.add_field(name="👤 Player",   value=player.mention, inline=True)
-    e.add_field(name="🏷️ Position", value=p[4] or "N/A",  inline=True)
-    e.add_field(name="📋 Roster",   value=f"`{count+1}/20`", inline=True)
-    e.set_footer(text="⚾ HCBB 9v9 2.0 League")
-    await interaction.followup.send(embed=e)
+    # Send to approval channel
+    approval_ch = interaction.guild.get_channel(APPROVAL_CHANNEL)
+    if not approval_ch:
+        return await interaction.followup.send(embed=error_embed("Channel Not Found", "Approval channel not found."))
 
-    # Transaction channel
-    tx = discord.Embed(color=0x2ECC71)
-    tx.set_author(name="✍️  Transaction Wire — SIGNED", icon_url=player.display_avatar.url)
-    tx.set_thumbnail(url=player.display_avatar.url)
-    tx.description = f"**{player.display_name}** signed to **{row[1]}**"
-    tx.add_field(name="👤 Player",   value=player.mention, inline=True)
-    tx.add_field(name="🏟️ Team",    value=team.mention,    inline=True)
-    tx.add_field(name="🏷️ Position", value=p[4] or "N/A",  inline=True)
-    tx.set_footer(text="⚾ HCBB 9v9 2.0 League")
-    await post_transaction(interaction.guild, config, tx)
+    req_embed = discord.Embed(color=0xF1C40F)
+    req_embed.set_author(name="📋  Signing Request — Awaiting Board Approval", icon_url=player.display_avatar.url)
+    req_embed.set_thumbnail(url=player.display_avatar.url)
+    req_embed.description = f"**{interaction.user.display_name}** wants to sign {player.mention} to **{row[1]}**"
+    req_embed.add_field(name="👤 Player",   value=f"{player.mention} `{player.display_name}`", inline=True)
+    req_embed.add_field(name="🏟️ Team",    value=f"**{row[1]}** {team.mention}", inline=True)
+    req_embed.add_field(name="🏷️ Position", value=p[4] or "N/A", inline=True)
+    req_embed.add_field(name="👔 Requested By", value=f"{interaction.user.mention}", inline=True)
+    req_embed.add_field(name="📋 Roster",   value=f"{count}/20", inline=True)
+    req_embed.set_footer(text=f"⚾ HCBB 9v9 2.0 League  ·  Request #{req_id}")
 
-    # DM the signed player
-    dm = discord.Embed(color=0x2ECC71)
-    dm.set_author(name="✍️  You've Been Signed!", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
-    dm.set_thumbnail(url=interaction.guild.icon.url if interaction.guild.icon else discord.Embed.Empty)
-    dm.description = f"You have been signed to **{row[1]}** in the CLS League!"
-    dm.add_field(name="🏟️ Team",  value=f"**{row[1]}**", inline=True)
-    dm.add_field(name="👤 GM",    value=f"{interaction.user.mention} `{interaction.user.display_name}`", inline=True)
-    dm.add_field(name="🏷️ Position", value=p[4] or "N/A", inline=True)
-    dm.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Welcome to the team!")
-    try:
-        await player.send(embed=dm)
-    except discord.Forbidden:
-        pass
+    view = SignApprovalView(
+        player_id=player.id,
+        team_id=row[0],
+        team_name=row[1],
+        gm_id=interaction.user.id,
+        request_id=req_id,
+        position=p[4] or "N/A"
+    )
+    await approval_ch.send(embed=req_embed, view=view)
+
+    # Confirm to GM
+    e = discord.Embed(color=0xF1C40F)
+    e.set_author(name="📋  Signing Request Submitted", icon_url=player.display_avatar.url)
+    e.description = f"Your request to sign {player.mention} to **{row[1]}** has been sent to the board for approval."
+    e.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  You'll be notified when approved or denied")
+    await interaction.followup.send(embed=e, ephemeral=True)
 
 @bot.tree.command(name="release", description="Release a player from your team")
 @app_commands.describe(player="Player to release", team="Your team")
@@ -2984,6 +3002,139 @@ async def remove_asst_manager(interaction: discord.Interaction, team: discord.Ro
     e.add_field(name="Team", value=team.mention, inline=True)
     e.set_footer(text="⚾ HCBB 9v9 2.0 League")
     await interaction.followup.send(embed=e)
+
+
+# ── SIGN APPROVAL VIEW ────────────────────────────────────────────
+class SignApprovalView(discord.ui.View):
+    def __init__(self, player_id: int, team_id: int, team_name: str, gm_id: int, request_id: int, position: str = "N/A"):
+        super().__init__(timeout=None)
+        self.player_id  = player_id
+        self.team_id    = team_id
+        self.team_name  = team_name
+        self.gm_id      = gm_id
+        self.request_id = request_id
+        self.position   = position
+
+    @discord.ui.button(label="✅  Approve", style=discord.ButtonStyle.success, custom_id="sign_approve")
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ Only the board can approve signings.", ephemeral=True)
+
+        db = await get_db()
+        cur = await db.execute("SELECT status FROM sign_requests WHERE id=?", (self.request_id,))
+        req = await cur.fetchone()
+        if not req or req[0] != "pending":
+            return await interaction.response.send_message("❌ Already handled.", ephemeral=True)
+
+        # Roster check
+        cur2 = await db.execute("SELECT COUNT(*) FROM players WHERE team_id=?", (self.team_id,))
+        count = (await cur2.fetchone())[0]
+        if count >= 20:
+            await db.execute("UPDATE sign_requests SET status='denied' WHERE id=?", (self.request_id,))
+            await db.commit()
+            return await interaction.response.edit_message(embed=error_embed("Roster Full", "Signing denied — roster is full."), view=None)
+
+        # Free agent check
+        cur3 = await db.execute("SELECT id, free_agent FROM players WHERE discord_id=?", (self.player_id,))
+        p = await cur3.fetchone()
+        if not p or not p[1]:
+            await db.execute("UPDATE sign_requests SET status='denied' WHERE id=?", (self.request_id,))
+            await db.commit()
+            return await interaction.response.edit_message(embed=error_embed("No Longer Available", "Player is no longer a free agent."), view=None)
+
+        # Sign them
+        await db.execute("UPDATE players SET team_id=?, free_agent=0 WHERE discord_id=?", (self.team_id, self.player_id))
+        await db.execute("INSERT INTO transactions (player_id, to_team, type) VALUES (?,?,?)", (p[0], self.team_id, "SIGN"))
+        await db.execute("UPDATE sign_requests SET status='approved' WHERE id=?", (self.request_id,))
+        await db.commit()
+
+        # Assign roles NOW (after approval)
+        guild = interaction.guild
+        member = guild.get_member(self.player_id)
+        if member:
+            await add_team_role(member, guild, self.team_id)
+            fa_role = guild.get_role(FA_ROLE_ID)
+            if fa_role and fa_role in member.roles:
+                try:
+                    await member.remove_roles(fa_role, reason="HCBB: Signing approved")
+                except discord.Forbidden:
+                    pass
+            # DM player
+            try:
+                dm = discord.Embed(color=0x2ECC71)
+                dm.set_author(name="✍️  You've Been Signed!", icon_url=guild.icon.url if guild.icon else None)
+                dm.description = f"Your signing to **{self.team_name}** has been approved by the board!"
+                dm.add_field(name="🏟️ Team", value=f"**{self.team_name}**", inline=True)
+                dm.add_field(name="🏷️ Position", value=self.position, inline=True)
+                dm.set_footer(text="⚾ HCBB 9v9 2.0 League  ·  Welcome to the team!")
+                await member.send(embed=dm)
+            except discord.Forbidden:
+                pass
+
+        # Notify GM
+        gm = interaction.client.get_user(self.gm_id)
+        if gm:
+            try:
+                notif = discord.Embed(color=0x2ECC71)
+                notif.set_author(name="✅  Signing Approved!")
+                notif.description = f"The board approved signing <@{self.player_id}> to **{self.team_name}**!"
+                notif.set_footer(text="⚾ HCBB 9v9 2.0 League")
+                await gm.send(embed=notif)
+            except discord.Forbidden:
+                pass
+
+        # Post to transactions channel
+        config = await get_config(guild.id)
+        tx = discord.Embed(color=0x2ECC71)
+        tx.set_author(name="✍️  Transaction Wire — SIGNED")
+        tx.description = f"<@{self.player_id}> signed to **{self.team_name}** *(Board Approved)*"
+        tx.add_field(name="👤 Player",     value=f"<@{self.player_id}>", inline=True)
+        tx.add_field(name="🏟️ Team",      value=f"**{self.team_name}**", inline=True)
+        tx.add_field(name="✅ Approved By", value=interaction.user.mention, inline=True)
+        tx.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        await post_transaction(guild, config, tx)
+
+        e = discord.Embed(color=0x2ECC71)
+        e.set_author(name="✅  Signing Approved")
+        e.description = f"<@{self.player_id}> has been signed to **{self.team_name}**"
+        e.add_field(name="✅ Approved By", value=interaction.user.mention, inline=True)
+        e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        await interaction.response.edit_message(embed=e, view=None)
+        self.stop()
+
+    @discord.ui.button(label="❌  Deny", style=discord.ButtonStyle.danger, custom_id="sign_deny")
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ Only the board can deny signings.", ephemeral=True)
+
+        db = await get_db()
+        cur = await db.execute("SELECT status FROM sign_requests WHERE id=?", (self.request_id,))
+        req = await cur.fetchone()
+        if not req or req[0] != "pending":
+            return await interaction.response.send_message("❌ Already handled.", ephemeral=True)
+
+        await db.execute("UPDATE sign_requests SET status='denied' WHERE id=?", (self.request_id,))
+        await db.commit()
+
+        # Notify GM
+        gm = interaction.client.get_user(self.gm_id)
+        if gm:
+            try:
+                notif = discord.Embed(color=0xFF4444)
+                notif.set_author(name="❌  Signing Denied")
+                notif.description = f"The board denied signing <@{self.player_id}> to **{self.team_name}**."
+                notif.set_footer(text="⚾ HCBB 9v9 2.0 League")
+                await gm.send(embed=notif)
+            except discord.Forbidden:
+                pass
+
+        e = discord.Embed(color=0xFF4444)
+        e.set_author(name="❌  Signing Denied")
+        e.description = f"Signing of <@{self.player_id}> to **{self.team_name}** was denied by the board."
+        e.add_field(name="❌ Denied By", value=interaction.user.mention, inline=True)
+        e.set_footer(text="⚾ HCBB 9v9 2.0 League")
+        await interaction.response.edit_message(embed=e, view=None)
+        self.stop()
 
 # ── CONFIRM VIEW ──────────────────────────────────────────────────
 class ConfirmView(discord.ui.View):
